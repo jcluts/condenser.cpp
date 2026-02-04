@@ -1620,9 +1620,7 @@ struct LLMEmbedder : public Conditioner {
 
         arch = LLM::LLMArch::QWEN3;
 
-        LOG_DEBUG("LLMEmbedder: Creating Qwen2Tokenizer");
         tokenizer = std::make_shared<LLM::Qwen2Tokenizer>();
-        LOG_DEBUG("LLMEmbedder: Qwen2Tokenizer created successfully");
 
         llm = std::make_shared<LLM::LLMRunner>(arch,
                                                backend,
@@ -1680,21 +1678,16 @@ struct LLMEmbedder : public Conditioner {
 
         std::vector<int> tokens;
         std::vector<float> weights;
-        LOG_DEBUG("LLMEmbedder tokenize: processing %zu parsed_attention items", parsed_attention.size());
         for (size_t idx = 0; idx < parsed_attention.size(); idx++) {
             const auto& item = parsed_attention[idx];
             const std::string& curr_text = item.first;
             float curr_weight            = item.second;
-            LOG_DEBUG("LLMEmbedder tokenize: item %zu, text length=%zu, weight=%.2f, text='%s'", 
-                     idx, curr_text.size(), curr_weight, curr_text.c_str());
             
             // WORKAROUND: Skip empty or whitespace-only strings that might cause tokenizer crashes
             if (curr_text.empty() || curr_text.find_first_not_of(" \t\n\r") == std::string::npos) {
-                LOG_DEBUG("LLMEmbedder tokenize: Skipping empty/whitespace item %zu", idx);
                 continue;
             }
             
-            LOG_DEBUG("LLMEmbedder tokenize: About to call tokenizer->tokenize() for item %zu", idx);
             std::vector<int> curr_tokens;
             try {
                 curr_tokens = tokenizer->tokenize(curr_text, nullptr);
@@ -1706,18 +1699,13 @@ struct LLMEmbedder : public Conditioner {
                 LOG_ERROR("LLMEmbedder tokenize: UNKNOWN EXCEPTION in tokenizer->tokenize() for item %zu", idx);
                 throw;
             }
-            LOG_DEBUG("LLMEmbedder tokenize: item %zu produced %zu tokens", idx, curr_tokens.size());
+
             tokens.insert(tokens.end(), curr_tokens.begin(), curr_tokens.end());
             weights.insert(weights.end(), curr_tokens.size(), curr_weight);
         }
-        LOG_DEBUG("LLMEmbedder tokenize: total tokens=%zu, total weights=%zu", tokens.size(), weights.size());
 
         tokenizer->pad_tokens(tokens, weights, max_length, padding);
 
-        // for (int i = 0; i < tokens.size(); i++) {
-        //     std::cout << tokens[i] << ":" << weights[i] << ", " << i << std::endl;
-        // }
-        // std::cout << std::endl;
 
         return {tokens, weights};
     }

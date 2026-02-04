@@ -698,22 +698,11 @@ struct AutoEncoderKL : public VAE {
     }
 
     struct ggml_cgraph* build_graph(struct ggml_tensor* z, bool decode_graph) {
-        LOG_DEBUG("VAE build_graph: Creating new graph");
         struct ggml_cgraph* gf = ggml_new_graph(compute_ctx);
-
-        LOG_DEBUG("VAE build_graph: Converting z to backend");
         z = to_backend(z);
-
-        LOG_DEBUG("VAE build_graph: Getting runner context");
         auto runner_ctx = get_context();
-
-        LOG_DEBUG("VAE build_graph: About to call ae.%s", decode_graph ? "decode" : "encode");
         struct ggml_tensor* out = decode_graph ? ae.decode(&runner_ctx, z) : ae.encode(&runner_ctx, z);
-        LOG_DEBUG("VAE build_graph: ae.%s returned", decode_graph ? "decode" : "encode");
-
-        LOG_DEBUG("VAE build_graph: Building forward expansion");
         ggml_build_forward_expand(gf, out);
-
         return gf;
     }
 

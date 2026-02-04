@@ -1932,7 +1932,6 @@ public:
                  struct ggml_tensor** output          = nullptr,
                  struct ggml_context* output_ctx      = nullptr) {
 
-        LOG_DEBUG("compute started");
         if (!offload_params_to_runtime_backend()) {
             LOG_ERROR("offload params to runtime backend failed");
             return false;
@@ -1942,20 +1941,15 @@ public:
             return false;
         }
         reset_compute_ctx();
-        LOG_DEBUG("%s compute graph allocation started", get_desc().c_str());
         struct ggml_cgraph* gf = get_compute_graph(get_graph);
         if (!ggml_gallocr_alloc_graph(compute_allocr, gf)) {
             LOG_ERROR("%s alloc compute graph failed", get_desc().c_str());
             return false;
         }
-        LOG_DEBUG("%s compute graph allocation completed", get_desc().c_str());
         copy_data_to_backend_tensor();
-        LOG_DEBUG("%s compute graph execution started", get_desc().c_str());
         if (ggml_backend_is_cpu(runtime_backend)) {
-            LOG_DEBUG("%s set n_threads = %d", get_desc().c_str(), n_threads);
             ggml_backend_cpu_set_n_threads(runtime_backend, n_threads);
         }
-        LOG_DEBUG("%s graph compute started", get_desc().c_str());
         ggml_status status = ggml_backend_graph_compute(runtime_backend, gf);
         if (status != GGML_STATUS_SUCCESS) {
             LOG_ERROR("%s compute failed: %s", get_desc().c_str(), ggml_status_to_string(status));
@@ -1963,23 +1957,17 @@ public:
         }
 #ifdef GGML_PERF
         ggml_graph_print(gf);
-#endif
-        LOG_DEBUG("%s compute graph execution completed", get_desc().c_str());  
+#endif 
         copy_cache_tensors_to_cache_buffer();
-        LOG_DEBUG("%s compute completed", get_desc().c_str());
         if (output != nullptr) {
             auto result = ggml_get_tensor(compute_ctx, final_result_name.c_str());
-            LOG_DEBUG("%s retrieve final result tensor '%s'", get_desc().c_str(), final_result_name.c_str());
             if (*output == nullptr && output_ctx != nullptr) {
-                LOG_DEBUG("%s duplicate final result tensor to output_ctx", get_desc().c_str());
                 *output = ggml_dup_tensor(output_ctx, result);
             }
             if (*output != nullptr) {
-                LOG_DEBUG("%s sync final result tensor data to output tensor", get_desc().c_str());
                 ggml_ext_backend_tensor_get_and_sync(runtime_backend, result, (*output)->data, 0, ggml_nbytes(*output));
             }
         }
-        LOG_DEBUG("%s compute finished", get_desc().c_str());
         if (free_compute_buffer_immediately) {
             free_compute_buffer();
         }
