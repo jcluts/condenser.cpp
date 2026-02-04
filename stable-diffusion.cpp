@@ -573,19 +573,9 @@ public:
     std::vector<float> process_timesteps(const std::vector<float>& timesteps,
                                          ggml_tensor* init_latent,
                                          ggml_tensor* denoise_mask) {
-        if (diffusion_model->get_desc() == "Wan2.2-TI2V-5B") {
-            auto new_timesteps = std::vector<float>(init_latent->ne[2], timesteps[0]);
 
-            if (denoise_mask != nullptr) {
-                float value = ggml_ext_tensor_get_f32(denoise_mask, 0, 0, 0, 0);
-                if (value == 0.f) {
-                    new_timesteps[0] = 0.f;
-                }
-            }
-            return new_timesteps;
-        } else {
-            return timesteps;
-        }
+        return timesteps;
+
     }
 
     // a = a * mask + b * (1 - mask)
@@ -827,9 +817,6 @@ public:
             if (ggml_n_dims(x) == 4) {
                 // assuming video mode (if batch processing gets implemented this will break)
                 int64_t T = x->ne[2];
-                if (sd_version_is_wan(version)) {
-                    T = ((T - 1) * 4) + 1;
-                }
                 preview_tensor = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32,
                                                     W,
                                                     H,
@@ -977,17 +964,8 @@ public:
 
             float t = denoiser->sigma_to_t(sigma);
             std::vector<float> timesteps_vec;
-            if (shifted_timestep > 0 && sd_version_is_sdxl(version)) {
-                float shifted_t_float = t * (float(shifted_timestep) / float(TIMESTEPS));
-                int64_t shifted_t     = static_cast<int64_t>(roundf(shifted_t_float));
-                shifted_t             = std::max((int64_t)0, std::min((int64_t)(TIMESTEPS - 1), shifted_t));
-                LOG_DEBUG("shifting timestep from %.2f to %" PRId64 " (sigma: %.4f)", t, shifted_t, sigma);
-                timesteps_vec.assign(1, (float)shifted_t);
-            } else if (sd_version_is_z_image(version)) {
-                timesteps_vec.assign(1, 1000.f - t);
-            } else {
-                timesteps_vec.assign(1, t);
-            }
+
+            timesteps_vec.assign(1, t);
 
             timesteps_vec  = process_timesteps(timesteps_vec, init_latent, denoise_mask);
             auto timesteps = vector_to_ggml_tensor(work_ctx, timesteps_vec);
@@ -997,10 +975,6 @@ public:
             copy_ggml_tensor(noised_input, input);
             // noised_input = noised_input * c_in
             ggml_ext_tensor_scale_inplace(noised_input, c_in);
-
-            if (denoise_mask != nullptr && version == VERSION_WAN2_2_TI2V) {
-                apply_mask(noised_input, init_latent, denoise_mask);
-            }
 
             std::vector<struct ggml_tensor*> controls;
 
@@ -1100,18 +1074,6 @@ public:
             float* vec_input     = (float*)input->data;
             float* positive_data = (float*)out_cond->data;
             int ne_elements      = (int)ggml_nelements(denoised);
-
-            if (shifted_timestep > 0 && sd_version_is_sdxl(version)) {
-                int64_t shifted_t_idx              = static_cast<int64_t>(roundf(timesteps_vec[0]));
-                float shifted_sigma                = denoiser->t_to_sigma((float)shifted_t_idx);
-                std::vector<float> shifted_scaling = denoiser->get_scalings(shifted_sigma);
-                float shifted_c_skip               = shifted_scaling[0];
-                float shifted_c_out                = shifted_scaling[1];
-                float shifted_c_in                 = shifted_scaling[2];
-
-                c_skip = shifted_c_skip * c_in / shifted_c_in;
-                c_out  = shifted_c_out;
-            }
 
             for (int i = 0; i < ne_elements; i++) {
                 float latent_result = positive_data[i];
@@ -1226,42 +1188,20 @@ public:
     }
 
     int get_vae_scale_factor() {
-        int vae_scale_factor = 8;
-        if (version == VERSION_WAN2_2_TI2V) {
-            vae_scale_factor = 16;
-        } else if (sd_version_is_flux2(version)) {
-            vae_scale_factor = 16;
-        } else if (version == VERSION_CHROMA_RADIANCE) {
-            vae_scale_factor = 1;
-        }
+        //flux 2 scale factor
+        int vae_scale_factor = 16;
         return vae_scale_factor;
     }
 
     int get_diffusion_model_down_factor() {
-        int down_factor = 8;  // unet
-        if (sd_version_is_dit(version)) {
-            if (sd_version_is_wan(version)) {
-                down_factor = 2;
-            } else {
-                down_factor = 1;
-            }
-        }
+        //flux 2 down factor
+        int down_factor = 1;
         return down_factor;
     }
 
     int get_latent_channel() {
-        int latent_channel = 4;
-        if (sd_version_is_dit(version)) {
-            if (version == VERSION_WAN2_2_TI2V) {
-                latent_channel = 48;
-            } else if (version == VERSION_CHROMA_RADIANCE) {
-                latent_channel = 3;
-            } else if (sd_version_is_flux2(version)) {
-                latent_channel = 128;
-            } else {
-                latent_channel = 16;
-            }
-        }
+        //flux 2 latent channel
+        int latent_channel = 128;
         return latent_channel;
     }
 
@@ -1279,9 +1219,7 @@ public:
         int W                = width / vae_scale_factor;
         int H                = height / vae_scale_factor;
         int T                = frames;
-        if (sd_version_is_wan(version)) {
-            T = ((T - 1) / 4) + 1;
-        }
+
         int C = get_latent_channel();
         ggml_tensor* init_latent;
 
@@ -1351,81 +1289,64 @@ public:
     }
 
     void process_latent_in(ggml_tensor* latent) {
-        if (sd_version_is_wan(version) || sd_version_is_qwen_image(version) || sd_version_is_flux2(version)) {
-            int channel_dim = sd_version_is_flux2(version) ? 2 : 3;
-            std::vector<float> latents_mean_vec;
-            std::vector<float> latents_std_vec;
-            get_latents_mean_std_vec(latent, channel_dim, latents_mean_vec, latents_std_vec);
 
-            float mean;
-            float std_;
-            for (int i = 0; i < latent->ne[3]; i++) {
-                if (channel_dim == 3) {
-                    mean = latents_mean_vec[i];
-                    std_ = latents_std_vec[i];
+        int channel_dim = sd_version_is_flux2(version) ? 2 : 3;
+        std::vector<float> latents_mean_vec;
+        std::vector<float> latents_std_vec;
+        get_latents_mean_std_vec(latent, channel_dim, latents_mean_vec, latents_std_vec);
+
+        float mean;
+        float std_;
+        for (int i = 0; i < latent->ne[3]; i++) {
+            if (channel_dim == 3) {
+                mean = latents_mean_vec[i];
+                std_ = latents_std_vec[i];
+            }
+            for (int j = 0; j < latent->ne[2]; j++) {
+                if (channel_dim == 2) {
+                    mean = latents_mean_vec[j];
+                    std_ = latents_std_vec[j];
                 }
-                for (int j = 0; j < latent->ne[2]; j++) {
-                    if (channel_dim == 2) {
-                        mean = latents_mean_vec[j];
-                        std_ = latents_std_vec[j];
-                    }
-                    for (int k = 0; k < latent->ne[1]; k++) {
-                        for (int l = 0; l < latent->ne[0]; l++) {
-                            float value = ggml_ext_tensor_get_f32(latent, l, k, j, i);
-                            value       = (value - mean) * scale_factor / std_;
-                            ggml_ext_tensor_set_f32(latent, value, l, k, j, i);
-                        }
+                for (int k = 0; k < latent->ne[1]; k++) {
+                    for (int l = 0; l < latent->ne[0]; l++) {
+                        float value = ggml_ext_tensor_get_f32(latent, l, k, j, i);
+                        value       = (value - mean) * scale_factor / std_;
+                        ggml_ext_tensor_set_f32(latent, value, l, k, j, i);
                     }
                 }
             }
-        } else if (version == VERSION_CHROMA_RADIANCE) {
-            // pass
-        } else {
-            ggml_ext_tensor_iter(latent, [&](ggml_tensor* latent, int64_t i0, int64_t i1, int64_t i2, int64_t i3) {
-                float value = ggml_ext_tensor_get_f32(latent, i0, i1, i2, i3);
-                value       = (value - shift_factor) * scale_factor;
-                ggml_ext_tensor_set_f32(latent, value, i0, i1, i2, i3);
-            });
         }
+  
     }
 
     void process_latent_out(ggml_tensor* latent) {
-        if (sd_version_is_wan(version) || sd_version_is_qwen_image(version) || sd_version_is_flux2(version)) {
-            int channel_dim = sd_version_is_flux2(version) ? 2 : 3;
-            std::vector<float> latents_mean_vec;
-            std::vector<float> latents_std_vec;
-            get_latents_mean_std_vec(latent, channel_dim, latents_mean_vec, latents_std_vec);
+        int channel_dim = sd_version_is_flux2(version) ? 2 : 3;
+        std::vector<float> latents_mean_vec;
+        std::vector<float> latents_std_vec;
+        get_latents_mean_std_vec(latent, channel_dim, latents_mean_vec, latents_std_vec);
 
-            float mean;
-            float std_;
-            for (int i = 0; i < latent->ne[3]; i++) {
-                if (channel_dim == 3) {
-                    mean = latents_mean_vec[i];
-                    std_ = latents_std_vec[i];
+        float mean;
+        float std_;
+        for (int i = 0; i < latent->ne[3]; i++) {
+            if (channel_dim == 3) {
+                mean = latents_mean_vec[i];
+                std_ = latents_std_vec[i];
+            }
+            for (int j = 0; j < latent->ne[2]; j++) {
+                if (channel_dim == 2) {
+                    mean = latents_mean_vec[j];
+                    std_ = latents_std_vec[j];
                 }
-                for (int j = 0; j < latent->ne[2]; j++) {
-                    if (channel_dim == 2) {
-                        mean = latents_mean_vec[j];
-                        std_ = latents_std_vec[j];
-                    }
-                    for (int k = 0; k < latent->ne[1]; k++) {
-                        for (int l = 0; l < latent->ne[0]; l++) {
-                            float value = ggml_ext_tensor_get_f32(latent, l, k, j, i);
-                            value       = value * std_ / scale_factor + mean;
-                            ggml_ext_tensor_set_f32(latent, value, l, k, j, i);
-                        }
+                for (int k = 0; k < latent->ne[1]; k++) {
+                    for (int l = 0; l < latent->ne[0]; l++) {
+                        float value = ggml_ext_tensor_get_f32(latent, l, k, j, i);
+                        value       = value * std_ / scale_factor + mean;
+                        ggml_ext_tensor_set_f32(latent, value, l, k, j, i);
                     }
                 }
             }
-        } else if (version == VERSION_CHROMA_RADIANCE) {
-            // pass
-        } else {
-            ggml_ext_tensor_iter(latent, [&](ggml_tensor* latent, int64_t i0, int64_t i1, int64_t i2, int64_t i3) {
-                float value = ggml_ext_tensor_get_f32(latent, i0, i1, i2, i3);
-                value       = (value / scale_factor) + shift_factor;
-                ggml_ext_tensor_set_f32(latent, value, i0, i1, i2, i3);
-            });
         }
+
     }
 
     void get_tile_sizes(int& tile_size_x,
@@ -1468,27 +1389,19 @@ public:
             // TODO wan2.2 vae support?
             int64_t ne2;
             int64_t ne3;
-            if (sd_version_is_qwen_image(version)) {
-                ne2 = 1;
-                ne3 = C * x->ne[3];
-            } else {
-                int64_t out_channels   = C;
-                bool encode_outputs_mu = sd_version_is_flux2(version);
-                if (!encode_outputs_mu) {
-                    out_channels *= 2;
-                }
-                ne2 = out_channels;
-                ne3 = x->ne[3];
+
+            int64_t out_channels   = C;
+            bool encode_outputs_mu = sd_version_is_flux2(version);
+            if (!encode_outputs_mu) {
+                out_channels *= 2;
             }
+            ne2 = out_channels;
+            ne3 = x->ne[3];
             result = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, W, H, ne2, ne3);
         }
 
-        if (sd_version_is_qwen_image(version)) {
-            x = ggml_reshape_4d(work_ctx, x, x->ne[0], x->ne[1], 1, x->ne[2] * x->ne[3]);
-        }
-
-
         process_vae_input_tensor(x);
+
         if (vae_tiling_params.enabled && !encode_video) {
             float tile_overlap;
             int tile_size_x, tile_size_y;
@@ -1543,30 +1456,11 @@ public:
 
     ggml_tensor* get_first_stage_encoding(ggml_context* work_ctx, ggml_tensor* vae_output) {
         ggml_tensor* latent;
-        if (use_tiny_autoencoder ||
-            sd_version_is_qwen_image(version) ||
-            sd_version_is_wan(version) ||
-            sd_version_is_flux2(version) ||
-            version == VERSION_CHROMA_RADIANCE) {
-            latent = vae_output;
-        } else if (version == VERSION_SD1_PIX2PIX) {
-            latent = ggml_view_3d(work_ctx,
-                                  vae_output,
-                                  vae_output->ne[0],
-                                  vae_output->ne[1],
-                                  vae_output->ne[2] / 2,
-                                  vae_output->nb[1],
-                                  vae_output->nb[2],
-                                  0);
-        } else {
-            latent = gaussian_latent_sample(work_ctx, vae_output);
-        }
-        if (!use_tiny_autoencoder) {
-            process_latent_in(latent);
-        }
-        if (sd_version_is_qwen_image(version)) {
-            latent = ggml_reshape_4d(work_ctx, latent, latent->ne[0], latent->ne[1], latent->ne[3], 1);
-        }
+
+        //flux 2
+        latent = vae_output;
+        process_latent_in(latent);
+
         return latent;
     }
 
@@ -1591,10 +1485,6 @@ public:
 
         int64_t t0 = ggml_time_ms();
         LOG_DEBUG("computing vae decode graph...");
-        if (sd_version_is_qwen_image(version)) {
-            x = ggml_reshape_4d(work_ctx, x, x->ne[0], x->ne[1], 1, x->ne[2] * x->ne[3]);
-        }
-        LOG_DEBUG("Decoding first stage: after reshape");
         process_latent_out(x);
         // x = load_tensor_from_file(work_ctx, "wan_vae_z.bin");
         if (vae_tiling_params.enabled) {
@@ -1607,9 +1497,7 @@ public:
 
             // split latent in 32x32 tiles and compute in several steps
             auto on_tiling = [&](ggml_tensor* in, ggml_tensor* out, bool init) {
-                LOG_DEBUG("VAE on_tiling: About to call first_stage_model->compute");
                 first_stage_model->compute(n_threads, in, true, &out, nullptr);
-                LOG_DEBUG("VAE on_tiling: first_stage_model->compute returned");
             };
             sd_tiling_non_square(x, result, vae_scale_factor, tile_size_x, tile_size_y, tile_overlap, on_tiling);
         } else {
@@ -1617,11 +1505,9 @@ public:
             first_stage_model->compute(n_threads, x, true, &result, work_ctx);
         }
 
-        LOG_DEBUG("Decoding first stage: after compute");
         first_stage_model->free_compute_buffer();
         process_vae_output_tensor(result);
     
-
         int64_t t1 = ggml_time_ms();
         LOG_DEBUG("computing vae decode graph completed, taking %.2fs", (t1 - t0) * 1.0f / 1000);
         ggml_ext_tensor_clamp_inplace(result, 0.0f, 1.0f);
@@ -2161,9 +2047,7 @@ sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
     if (guidance.txt_cfg != 1.0 ||
         (sd_version_is_inpaint_or_unet_edit(sd_ctx->sd->version) && guidance.txt_cfg != guidance.img_cfg)) {
         bool zero_out_masked = false;
-        if (sd_version_is_sdxl(sd_ctx->sd->version) && negative_prompt.size() == 0 && !sd_ctx->sd->is_using_edm_v_parameterization) {
-            zero_out_masked = true;
-        }
+
         condition_params.text            = negative_prompt;
         condition_params.zero_out_masked = zero_out_masked;
         uncond                           = sd_ctx->sd->cond_stage_model->get_learned_condition(work_ctx,
@@ -2559,9 +2443,6 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
             double vae_height        = vae_width * ref_image.height / ref_image.width;
 
             int factor = 16;
-            if (sd_version_is_qwen_image(sd_ctx->sd->version)) {
-                factor = 32;
-            }
 
             vae_height = round(vae_height / factor) * factor;
             vae_width  = round(vae_width / factor) * factor;
