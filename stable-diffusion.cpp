@@ -254,7 +254,7 @@ public:
             }
         }
 
-        bool is_unet = sd_version_is_unet(model_loader.get_sd_version());
+        bool is_unet = false;
 
         if (strlen(SAFE_STR(sd_ctx_params->clip_l_path)) > 0) {
             LOG_INFO("loading clip_l from '%s'", sd_ctx_params->clip_l_path);
@@ -386,10 +386,6 @@ public:
 
             diffusion_model->alloc_params_buffer();
             diffusion_model->get_param_tensors(tensors);
-
-            if (sd_version_is_unet_edit(version)) {
-                vae_decode_only = false;
-            }
 
             if (high_noise_diffusion_model) {
                 high_noise_diffusion_model->alloc_params_buffer();
@@ -2419,14 +2415,7 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
     }
 
     std::vector<uint8_t> empty_image_data;
-    sd_image_t empty_image = {(uint32_t)width, (uint32_t)height, 3, nullptr};
-    if (ref_images.empty() && sd_version_is_unet_edit(sd_ctx->sd->version)) {
-        LOG_WARN("This model needs at least one reference image; using an empty reference");
-        empty_image_data.resize(width * height * 3);
-        ref_images.push_back(&empty_image);
-        empty_image.data = empty_image_data.data();
-        guidance.img_cfg = 0.f;
-    }
+
 
     if (ref_images.size() > 0) {
         LOG_INFO("EDIT mode");

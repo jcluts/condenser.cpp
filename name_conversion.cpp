@@ -654,17 +654,9 @@ std::string convert_diffusers_dit_to_original_lumina2(std::string name) {
 }
 
 std::string convert_diffusion_model_name(std::string name, std::string prefix, SDVersion version) {
-    if (sd_version_is_sd1(version) || sd_version_is_sd2(version)) {
-        name = convert_diffusers_unet_to_original_sd1(name);
-    } else if (sd_version_is_sdxl(version)) {
-        name = convert_diffusers_unet_to_original_sdxl(name);
-    } else if (sd_version_is_sd3(version)) {
-        name = convert_diffusers_dit_to_original_sd3(name);
-    } else if (sd_version_is_flux(version) || sd_version_is_flux2(version)) {
-        name = convert_diffusers_dit_to_original_flux(name);
-    } else if (sd_version_is_z_image(version)) {
-        name = convert_diffusers_dit_to_original_lumina2(name);
-    }
+
+    name = convert_diffusers_dit_to_original_flux(name);
+
     return name;
 }
 
