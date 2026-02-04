@@ -14,7 +14,6 @@
 #include <utility>
 #include <vector>
 
-#include "clip.hpp"
 #include "ggml_extend.hpp"
 #include "json.hpp"
 #include "rope.hpp"
@@ -22,6 +21,36 @@
 
 namespace LLM {
     constexpr int LLM_GRAPH_SIZE = 10240;
+
+    __STATIC_INLINE__ std::vector<std::pair<int, std::u32string>> bytes_to_unicode() {
+        std::vector<std::pair<int, std::u32string>> byte_unicode_pairs;
+        std::set<int> byte_set;
+        for (int b = static_cast<int>('!'); b <= static_cast<int>('~'); ++b) {
+            byte_set.insert(b);
+            byte_unicode_pairs.push_back(std::pair<int, std::u32string>(b, unicode_value_to_utf32(b)));
+        }
+        for (int b = 161; b <= 172; ++b) {
+            byte_set.insert(b);
+            byte_unicode_pairs.push_back(std::pair<int, std::u32string>(b, unicode_value_to_utf32(b)));
+        }
+        for (int b = 174; b <= 255; ++b) {
+            byte_set.insert(b);
+            byte_unicode_pairs.push_back(std::pair<int, std::u32string>(b, unicode_value_to_utf32(b)));
+        }
+        int n = 0;
+        for (int b = 0; b < 256; ++b) {
+            if (byte_set.find(b) == byte_set.end()) {
+                byte_unicode_pairs.push_back(std::pair<int, std::u32string>(b, unicode_value_to_utf32(n + 256)));
+                ++n;
+            }
+        }
+        // LOG_DEBUG("byte_unicode_pairs %d", byte_unicode_pairs.size());
+        return byte_unicode_pairs;
+    }
+
+    // Ref: https://github.com/openai/CLIP/blob/main/clip/simple_tokenizer.py
+
+    typedef std::function<bool(std::string&, std::vector<int32_t>&)> on_new_token_cb_t;
 
     class BPETokenizer {
     protected:

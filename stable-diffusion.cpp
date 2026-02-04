@@ -112,7 +112,6 @@ public:
     float shift_factor               = 0.f;
 
     std::shared_ptr<Conditioner> cond_stage_model;
-    std::shared_ptr<FrozenCLIPVisionEmbedder> clip_vision;  // for svd or wan2.1 i2v
     std::shared_ptr<DiffusionModel> diffusion_model;
     std::shared_ptr<DiffusionModel> high_noise_diffusion_model;
     std::shared_ptr<VAE> first_stage_model;
@@ -419,9 +418,6 @@ public:
             if (sd_ctx_params->flash_attn) {
                 LOG_INFO("Using flash attention");
                 cond_stage_model->set_flash_attention_enabled(true);
-                if (clip_vision) {
-                    clip_vision->set_flash_attention_enabled(true);
-                }
                 if (first_stage_model) {
                     first_stage_model->set_flash_attention_enabled(true);
                 }
@@ -573,100 +569,6 @@ public:
     }
 
 
-    ggml_tensor* get_clip_vision_output(ggml_context* work_ctx,
-                                        sd_image_t init_image,
-                                        bool return_pooled   = true,
-                                        int clip_skip        = -1,
-                                        bool zero_out_masked = false) {
-        ggml_tensor* output = nullptr;
-        if (zero_out_masked) {
-            if (return_pooled) {
-                output = ggml_new_tensor_1d(work_ctx,
-                                            GGML_TYPE_F32,
-                                            clip_vision->vision_model.projection_dim);
-            } else {
-                output = ggml_new_tensor_2d(work_ctx,
-                                            GGML_TYPE_F32,
-                                            clip_vision->vision_model.hidden_size,
-                                            257);
-            }
-
-            ggml_set_f32(output, 0.f);
-        } else {
-            sd_image_f32_t image         = sd_image_t_to_sd_image_f32_t(init_image);
-            sd_image_f32_t resized_image = clip_preprocess(image, clip_vision->vision_model.image_size, clip_vision->vision_model.image_size);
-            free(image.data);
-            image.data = nullptr;
-
-            ggml_tensor* pixel_values = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, resized_image.width, resized_image.height, 3, 1);
-            sd_image_f32_to_ggml_tensor(resized_image, pixel_values, false);
-            free(resized_image.data);
-            resized_image.data = nullptr;
-
-            // print_ggml_tensor(pixel_values);
-            clip_vision->compute(n_threads, pixel_values, return_pooled, clip_skip, &output, work_ctx);
-            // print_ggml_tensor(c_crossattn);
-        }
-        return output;
-    }
-
-    SDCondition get_svd_condition(ggml_context* work_ctx,
-                                  sd_image_t init_image,
-                                  int width,
-                                  int height,
-                                  int fps                  = 6,
-                                  int motion_bucket_id     = 127,
-                                  float augmentation_level = 0.f,
-                                  bool zero_out_masked     = false) {
-        // c_crossattn
-        int64_t t0                      = ggml_time_ms();
-        struct ggml_tensor* c_crossattn = get_clip_vision_output(work_ctx, init_image, true, -1, zero_out_masked);
-
-        // c_concat
-        struct ggml_tensor* c_concat = nullptr;
-        {
-            if (zero_out_masked) {
-                c_concat = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, width / get_vae_scale_factor(), height / get_vae_scale_factor(), 4, 1);
-                ggml_set_f32(c_concat, 0.f);
-            } else {
-                ggml_tensor* init_img = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, width, height, 3, 1);
-
-                if (width != init_image.width || height != init_image.height) {
-                    sd_image_f32_t image         = sd_image_t_to_sd_image_f32_t(init_image);
-                    sd_image_f32_t resized_image = resize_sd_image_f32_t(image, width, height);
-                    free(image.data);
-                    image.data = nullptr;
-                    sd_image_f32_to_ggml_tensor(resized_image, init_img, false);
-                    free(resized_image.data);
-                    resized_image.data = nullptr;
-                } else {
-                    sd_image_to_ggml_tensor(init_image, init_img);
-                }
-                if (augmentation_level > 0.f) {
-                    struct ggml_tensor* noise = ggml_dup_tensor(work_ctx, init_img);
-                    ggml_ext_im_set_randn_f32(noise, rng);
-                    // encode_pixels += torch.randn_like(pixels) * augmentation_level
-                    ggml_ext_tensor_scale_inplace(noise, augmentation_level);
-                    ggml_ext_tensor_add_inplace(init_img, noise);
-                }
-                ggml_tensor* moments = vae_encode(work_ctx, init_img);
-                c_concat             = get_first_stage_encoding(work_ctx, moments);
-            }
-        }
-
-        // y
-        struct ggml_tensor* y = nullptr;
-        {
-            y                            = ggml_new_tensor_1d(work_ctx, GGML_TYPE_F32, diffusion_model->get_adm_in_channels());
-            int out_dim                  = 256;
-            int fps_id                   = fps - 1;
-            std::vector<float> timesteps = {(float)fps_id, (float)motion_bucket_id, augmentation_level};
-            set_timestep_embedding(timesteps, y, out_dim);
-        }
-        int64_t t1 = ggml_time_ms();
-        LOG_DEBUG("computing svd condition graph completed, taking %" PRId64 " ms", t1 - t0);
-        return {c_crossattn, y, c_concat};
-    }
 
     std::vector<float> process_timesteps(const std::vector<float>& timesteps,
                                          ggml_tensor* init_latent,
