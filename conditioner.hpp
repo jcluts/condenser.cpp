@@ -1649,16 +1649,11 @@ struct LLMEmbedder : public Conditioner {
                 bool enable_vision                             = false)
         : version(version) {
         LLM::LLMArch arch = LLM::LLMArch::QWEN2_5_VL;
-        if (version == VERSION_FLUX2) {
-            arch = LLM::LLMArch::MISTRAL_SMALL_3_2;
-        } else if (sd_version_is_z_image(version) || version == VERSION_OVIS_IMAGE || version == VERSION_FLUX2_KLEIN) {
-            arch = LLM::LLMArch::QWEN3;
-        }
-        if (arch == LLM::LLMArch::MISTRAL_SMALL_3_2) {
-            tokenizer = std::make_shared<LLM::MistralTokenizer>();
-        } else {
-            tokenizer = std::make_shared<LLM::Qwen2Tokenizer>();
-        }
+
+        arch = LLM::LLMArch::QWEN3;
+
+        tokenizer = std::make_shared<LLM::Qwen2Tokenizer>();
+
         llm = std::make_shared<LLM::LLMRunner>(arch,
                                                backend,
                                                offload_params_to_cpu,

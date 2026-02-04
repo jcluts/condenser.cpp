@@ -114,37 +114,6 @@ __STATIC_INLINE__ struct ggml_tensor* ggml_ext_mul_n_mode(struct ggml_context* c
     return result;
 }
 
-__STATIC_INLINE__ struct ggml_tensor* ggml_ext_merge_lora(ggml_context* ctx,
-                                                          ggml_tensor* lora_down,
-                                                          ggml_tensor* lora_up,
-                                                          ggml_tensor* lora_mid = nullptr) {
-    struct ggml_tensor* updown;
-    // flat lora tensors to multiply it
-    int64_t lora_up_rows  = lora_up->ne[ggml_n_dims(lora_up) - 1];
-    lora_up               = ggml_reshape_2d(ctx, lora_up, ggml_nelements(lora_up) / lora_up_rows, lora_up_rows);
-    auto lora_down_n_dims = ggml_n_dims(lora_down);
-    // assume n_dims should always be a multiple of 2 (otherwise rank 1 doesn't work)
-    lora_down_n_dims       = (lora_down_n_dims + lora_down_n_dims % 2);
-    int64_t lora_down_rows = lora_down->ne[lora_down_n_dims - 1];
-    lora_down              = ggml_reshape_2d(ctx, lora_down, ggml_nelements(lora_down) / lora_down_rows, lora_down_rows);
-
-    // ggml_mul_mat requires tensor b transposed
-    lora_down = ggml_cont(ctx, ggml_transpose(ctx, lora_down));
-    if (lora_mid == nullptr) {
-        updown = ggml_mul_mat(ctx, lora_up, lora_down);
-        updown = ggml_cont(ctx, ggml_transpose(ctx, updown));
-    } else {
-        // undoing tucker decomposition for conv layers.
-        // lora_mid  has shape (3,    3,   Rank, Rank)
-        // lora_down has shape (Rank, In,  1,    1)
-        // lora_up   has shape (Rank, Out, 1,    1)
-        // conv layer shape is (3,    3,   Out,  In)
-        updown = ggml_ext_mul_n_mode(ctx, ggml_ext_mul_n_mode(ctx, lora_mid, lora_down, 3), lora_up, 2);
-        updown = ggml_cont(ctx, updown);
-    }
-    return updown;
-}
-
 // Kronecker product
 // [ne03,ne02,ne01,ne00] x [ne13,ne12,ne11,ne10] => [ne03*ne13,ne02*ne12,ne01*ne11,ne00*ne10]
 __STATIC_INLINE__ struct ggml_tensor* ggml_ext_kronecker(ggml_context* ctx, struct ggml_tensor* a, struct ggml_tensor* b) {
@@ -331,24 +300,6 @@ __STATIC_INLINE__ ggml_tensor* load_tensor_from_file(ggml_context* ctx, const st
     return tensor;
 }
 
-// __STATIC_INLINE__ void save_tensor_to_file(const std::string& file_name, ggml_tensor* tensor, const std::string & name) {
-//     std::string file_name_ = file_name + ".tensor";
-//     std::string name_ = name;
-//     std::ofstream file("./" + file_name_, std::ios::binary);
-//     file.write(reinterpret_cast<char*>(&tensor->n_dims), sizeof(tensor->n_dims));
-//     int len = (int)name_.size();
-//     file.write(reinterpret_cast<char*>(&len), sizeof(len));
-//     int ttype = (int)tensor->type;
-//     file.write(reinterpret_cast<char*>(&ttype), sizeof(ttype));
-//     for (int i = 0; i < tensor->n_dims; ++i) {
-//         int ne_ = (int) tensor->ne[i];
-//         file.write(reinterpret_cast<char*>(&ne_), sizeof(ne_));
-//     }
-//     file.write(&name_[0], len);
-//     char* data = nullptr;
-//     file.write((char*)tensor->data, ggml_nbytes(tensor));
-//     file.close();
-// }
 
 __STATIC_INLINE__ void copy_ggml_tensor(struct ggml_tensor* dst, struct ggml_tensor* src) {
     if (dst->type == src->type) {

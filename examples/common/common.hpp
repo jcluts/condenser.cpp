@@ -503,7 +503,7 @@ struct SDContextParams {
              &t5xxl_path},
             {"",
              "--llm",
-             "path to the llm text encoder. For example: (qwenvl2.5 for qwen-image, mistral-small3.2 for flux2, ...)",
+             "path to the llm text encoder.",
              &llm_path},
             {"",
              "--llm_vision",
@@ -714,19 +714,6 @@ struct SDContextParams {
             return 1;
         };
 
-        auto on_lora_apply_mode_arg = [&](int argc, const char** argv, int index) {
-            if (++index >= argc) {
-                return -1;
-            }
-            const char* arg = argv[index];
-            lora_apply_mode = str_to_lora_apply_mode(arg);
-            if (lora_apply_mode == LORA_APPLY_MODE_COUNT) {
-                LOG_ERROR("error: invalid lora apply model %s",
-                          arg);
-                return -1;
-            }
-            return 1;
-        };
 
         auto on_tile_size_arg = [&](int argc, const char** argv, int index) {
             if (++index >= argc) {
@@ -792,14 +779,6 @@ struct SDContextParams {
              "--prediction",
              "prediction type override, one of [eps, v, edm_v, sd3_flow, flux_flow, flux2_flow]",
              on_prediction_arg},
-            {"",
-             "--lora-apply-mode",
-             "the way to apply LoRA, one of [auto, immediately, at_runtime], default is auto. "
-             "In auto mode, if the model weights contain any quantized parameters, the at_runtime mode will be used; otherwise, immediately will be used."
-             "The immediately mode may have precision and compatibility issues with quantized parameters, "
-             "but it usually offers faster inference speed and, in some cases, lower memory usage. "
-             "The at_runtime mode, on the other hand, is exactly the opposite.",
-             on_lora_apply_mode_arg},
             {"",
              "--vae-tile-size",
              "tile size for vae tiling, format [X]x[Y] (default: 32x32)",
@@ -921,7 +900,6 @@ struct SDContextParams {
             << "  chroma_use_t5_mask: " << (chroma_use_t5_mask ? "true" : "false") << ",\n"
             << "  chroma_t5_mask_pad: " << chroma_t5_mask_pad << ",\n"
             << "  prediction: " << sd_prediction_name(prediction) << ",\n"
-            << "  lora_apply_mode: " << sd_lora_apply_mode_name(lora_apply_mode) << ",\n"
             << "  vae_tiling_params: { "
             << vae_tiling_params.enabled << ", "
             << vae_tiling_params.tile_size_x << ", "

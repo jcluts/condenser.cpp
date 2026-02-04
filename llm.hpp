@@ -370,107 +370,6 @@ namespace LLM {
         }
     };
 
-    class MistralTokenizer : public BPETokenizer {
-    protected:
-        void load_from_merges(const std::string& merges_utf8_str, const std::string& vocab_utf8_str) {
-            nlohmann::json vocab;
-
-            try {
-                vocab = nlohmann::json::parse(vocab_utf8_str);
-            } catch (const nlohmann::json::parse_error&) {
-                GGML_ABORT("invalid vocab json str");
-            }
-            for (const auto& [key, value] : vocab.items()) {
-                std::u32string token = utf8_to_utf32(key);
-                int i                = value;
-                encoder[token]       = i;
-                decoder[i]           = token;
-            }
-            encoder_len = static_cast<int>(vocab.size());
-            LOG_DEBUG("vocab size: %d", encoder_len);
-
-            auto byte_unicode_pairs = bytes_to_unicode();
-            byte_encoder            = std::map<int, std::u32string>(byte_unicode_pairs.begin(), byte_unicode_pairs.end());
-            for (auto& pair : byte_unicode_pairs) {
-                byte_decoder[pair.second] = pair.first;
-            }
-            std::vector<std::u32string> merges;
-            size_t start = 0;
-            size_t pos;
-            std::u32string merges_utf32_str = utf8_to_utf32(merges_utf8_str);
-            while ((pos = merges_utf32_str.find('\n', start)) != std::string::npos) {
-                merges.push_back(merges_utf32_str.substr(start, pos - start));
-                start = pos + 1;
-            }
-            LOG_DEBUG("merges size %llu", merges.size());
-            merges = std::vector<std::u32string>(merges.begin(), merges.end());
-            std::vector<std::pair<std::u32string, std::u32string>> merge_pairs;
-            // int print_num = 10;
-            for (const auto& merge : merges) {
-                size_t space_pos = merge.find(' ');
-                merge_pairs.emplace_back(merge.substr(0, space_pos), merge.substr(space_pos + 1));
-                // if (print_num > 0) {
-                //     print_num--;
-                //     printf("%s :: %s | %s \n", utf32_to_utf8(merge).c_str(), utf32_to_utf8(merge.substr(0, space_pos)).c_str(),
-                //                     utf32_to_utf8(merge.substr(space_pos + 1)).c_str());
-                // }
-            }
-
-            int rank = 0;
-            for (const auto& merge : merge_pairs) {
-                bpe_ranks[merge] = rank++;
-            }
-            bpe_len = rank;
-        };
-
-    public:
-        explicit MistralTokenizer(const std::string& merges_utf8_str = "", const std::string& vocab_utf8_str = "") {
-            add_bos_token = true;
-
-            UNK_TOKEN = "<unk>";
-            BOS_TOKEN = "<s>";
-            EOS_TOKEN = "</s>";
-            PAD_TOKEN = "<pad>";
-
-            UNK_TOKEN_ID = 0;
-            BOS_TOKEN_ID = 1;
-            EOS_TOKEN_ID = 2;
-            PAD_TOKEN_ID = 11;
-
-            special_tokens = {
-                "<unk>",
-                "<s>",
-                "</s>",
-                "[INST]",
-                "[/INST]",
-                "[AVAILABLE_TOOLS]",
-                "[/AVAILABLE_TOOLS]",
-                "[TOOL_RESULTS]",
-                "[/TOOL_RESULTS]",
-                "[TOOL_CALLS]",
-                "[IMG]",
-                "<pad>",
-                "[IMG_BREAK]",
-                "[IMG_END]",
-                "[PREFIX]",
-                "[MIDDLE]",
-                "[SUFFIX]",
-                "[SYSTEM_PROMPT]",
-                "[/SYSTEM_PROMPT]",
-                "[TOOL_CONTENT]",
-            };
-            for (int i = 20; i < 1000; i++) {
-                special_tokens.push_back("<SPECIAL_" + std::to_string(i) + ">");
-            }
-
-            if (merges_utf8_str.size() > 0 && vocab_utf8_str.size() > 0) {
-                load_from_merges(merges_utf8_str, vocab_utf8_str);
-            } else {
-                load_from_merges(ModelLoader::load_mistral_merges(), ModelLoader::load_mistral_vocab_json());
-            }
-        }
-    };
-
     enum class LLMArch {
         QWEN2_5_VL,
         QWEN3,
@@ -863,17 +762,10 @@ namespace LLM {
                 k = k_norm->forward(ctx, k);
             }
 
-            if (arch == LLMArch::MISTRAL_SMALL_3_2) {
-                q = ggml_rope_ext(ctx->ggml_ctx, q, input_pos, nullptr, 128, GGML_ROPE_TYPE_NORMAL, 8192, 1000000000.f, 1.f, 0.f, 1.f, 32.f, 1.f);
-                k = ggml_rope_ext(ctx->ggml_ctx, k, input_pos, nullptr, 128, GGML_ROPE_TYPE_NORMAL, 8192, 1000000000.f, 1.f, 0.f, 1.f, 32.f, 1.f);
-            } else if (arch == LLMArch::QWEN3) {
+            if (arch == LLMArch::QWEN3) {
                 q = ggml_rope_ext(ctx->ggml_ctx, q, input_pos, nullptr, 128, GGML_ROPE_TYPE_NEOX, 40960, 1000000.f, 1.f, 0.f, 1.f, 32.f, 1.f);
                 k = ggml_rope_ext(ctx->ggml_ctx, k, input_pos, nullptr, 128, GGML_ROPE_TYPE_NEOX, 40960, 1000000.f, 1.f, 0.f, 1.f, 32.f, 1.f);
-            } else {
-                int sections[4] = {16, 24, 24, 0};
-                q               = ggml_rope_multi(ctx->ggml_ctx, q, input_pos, nullptr, head_dim, sections, GGML_ROPE_TYPE_MROPE, 128000, 1000000.f, 1.f, 0.f, 1.f, 32.f, 1.f);
-                k               = ggml_rope_multi(ctx->ggml_ctx, k, input_pos, nullptr, head_dim, sections, GGML_ROPE_TYPE_MROPE, 128000, 1000000.f, 1.f, 0.f, 1.f, 32.f, 1.f);
-            }
+            } 
 
             q = ggml_cont(ctx->ggml_ctx, ggml_ext_torch_permute(ctx->ggml_ctx, q, 0, 2, 1, 3));  // [N, num_heads, n_token, head_dim]
             q = ggml_reshape_3d(ctx->ggml_ctx, q, q->ne[0], q->ne[1], q->ne[2] * q->ne[3]);      // [N*num_heads, n_token, head_dim]
@@ -1081,13 +973,7 @@ namespace LLM {
                   bool enable_vision_ = false)
             : GGMLRunner(backend, offload_params_to_cpu), enable_vision(enable_vision_) {
             params.arch = arch;
-            if (arch == LLMArch::MISTRAL_SMALL_3_2) {
-                params.head_dim     = 128;
-                params.num_heads    = 32;
-                params.num_kv_heads = 8;
-                params.qkv_bias     = false;
-                params.rms_norm_eps = 1e-5f;
-            } else if (arch == LLMArch::QWEN3) {
+            if (arch == LLMArch::QWEN3) {
                 params.head_dim     = 128;
                 params.num_heads    = 32;
                 params.num_kv_heads = 8;
@@ -1192,7 +1078,7 @@ namespace LLM {
             }
 
             int64_t n_tokens = input_ids->ne[0];
-            if (params.arch == LLMArch::MISTRAL_SMALL_3_2 || params.arch == LLMArch::QWEN3) {
+            if (params.arch == LLMArch::QWEN3) {
                 input_pos_vec.resize(n_tokens);
                 for (int i = 0; i < n_tokens; ++i) {
                     input_pos_vec[i] = i;
@@ -1432,11 +1318,9 @@ namespace LLM {
                     const std::string prefix                       = "",
                     bool enable_vision                             = false)
             : model(arch, backend, offload_params_to_cpu, tensor_storage_map, prefix, enable_vision) {
-            if (arch == LLMArch::MISTRAL_SMALL_3_2) {
-                tokenizer = std::make_shared<MistralTokenizer>();
-            } else {
-                tokenizer = std::make_shared<Qwen2Tokenizer>();
-            }
+
+            tokenizer = std::make_shared<Qwen2Tokenizer>();
+
         }
 
         void get_param_tensors(std::map<std::string, struct ggml_tensor*>& tensors, const std::string prefix) {
@@ -1498,7 +1382,6 @@ namespace LLM {
 
             struct ggml_context* work_ctx = ggml_init(params);
             GGML_ASSERT(work_ctx != nullptr);
-            bool test_mistral          = false;
             bool test_qwen3            = true;
             bool test_vit              = false;
             bool test_decoder_with_vit = false;
@@ -1572,29 +1455,7 @@ namespace LLM {
                 // ggml_ext_tensor_diff(ref_out, out, 0.01f);
 
                 LOG_DEBUG("llm test done in %lldms", t1 - t0);
-            } else if (test_mistral) {
-                std::pair<int, int> prompt_attn_range;
-                std::string text        = "[SYSTEM_PROMPT]You are an AI that reasons about image descriptions. You give structured responses focusing on object relationships, object\nattribution and actions without speculation.[/SYSTEM_PROMPT][INST]";
-                prompt_attn_range.first = static_cast<int>(text.size());
-                text += "a lovely cat";
-                prompt_attn_range.second = static_cast<int>(text.size());
-                text += "[/INST]";
-                auto tokens_and_weights     = tokenize(text, prompt_attn_range, 0, false);
-                std::vector<int>& tokens    = std::get<0>(tokens_and_weights);
-                std::vector<float>& weights = std::get<1>(tokens_and_weights);
-                for (auto token : tokens) {
-                    printf("%d ", token);
-                }
-                printf("\n");
-                auto input_ids          = vector_to_ggml_tensor_i32(work_ctx, tokens);
-                struct ggml_tensor* out = nullptr;
 
-                int64_t t0 = ggml_time_ms();
-                model.compute(8, input_ids, nullptr, {}, {10, 20, 30}, &out, work_ctx);
-                int64_t t1 = ggml_time_ms();
-
-                print_ggml_tensor(out);
-                LOG_DEBUG("llm test done in %lldms", t1 - t0);
             } else if (test_qwen3) {
                 std::pair<int, int> prompt_attn_range;
                 std::string text        = "<|im_start|>user\n";
