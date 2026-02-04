@@ -15,3 +15,6 @@ models*
 preview.png
 *.code-workspace
 ggml
+agent_docs/
+_test_images/
+_reference_images/

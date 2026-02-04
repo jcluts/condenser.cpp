@@ -2411,8 +2411,8 @@ public:
                 }
                 for (int j = 0; j < latent->ne[2]; j++) {
                     if (channel_dim == 2) {
-                        mean = latents_mean_vec[i];
-                        std_ = latents_std_vec[i];
+                        mean = latents_mean_vec[j];
+                        std_ = latents_std_vec[j];
                     }
                     for (int k = 0; k < latent->ne[1]; k++) {
                         for (int l = 0; l < latent->ne[0]; l++) {
@@ -2450,8 +2450,8 @@ public:
                 }
                 for (int j = 0; j < latent->ne[2]; j++) {
                     if (channel_dim == 2) {
-                        mean = latents_mean_vec[i];
-                        std_ = latents_std_vec[i];
+                        mean = latents_mean_vec[j];
+                        std_ = latents_std_vec[j];
                     }
                     for (int k = 0; k < latent->ne[1]; k++) {
                         for (int l = 0; l < latent->ne[0]; l++) {
