@@ -88,7 +88,6 @@ __STATIC_INLINE__ void ggml_log_callback_default(ggml_log_level level, const cha
     }
 }
 
-static_assert(GGML_MAX_NAME >= 128, "GGML_MAX_NAME must be at least 128");
 
 // n-mode tensor-matrix product
 // example: 2-mode product
@@ -1518,38 +1517,6 @@ __STATIC_INLINE__ size_t ggml_tensor_num(ggml_context* ctx) {
 #define MAX_PARAMS_TENSOR_NUM 32768
 #define MAX_GRAPH_SIZE 327680
 
-struct WeightAdapter {
-    struct ForwardParams {
-        enum class op_type_t {
-            OP_LINEAR,
-            OP_CONV2D,
-        } op_type;
-        struct {
-            bool force_prec_f32 = false;
-            float scale         = 1.f;
-        } linear;
-        struct {
-            int s0          = 1;
-            int s1          = 1;
-            int p0          = 0;
-            int p1          = 0;
-            int d0          = 1;
-            int d1          = 1;
-            bool direct     = false;
-            bool circular_x = false;
-            bool circular_y = false;
-            float scale     = 1.f;
-        } conv2d;
-    };
-    virtual ggml_tensor* patch_weight(ggml_context* ctx, ggml_tensor* weight, const std::string& weight_name) = 0;
-    virtual ggml_tensor* forward_with_lora(ggml_context* ctx,
-                                           ggml_tensor* x,
-                                           ggml_tensor* w,
-                                           ggml_tensor* b,
-                                           const std::string& prefix,
-                                           ForwardParams forward_params)                                      = 0;
-    virtual size_t get_extra_graph_size()                                                                     = 0;
-};
 
 struct GGMLRunnerContext {
     ggml_backend_t backend                        = nullptr;
@@ -1558,7 +1525,6 @@ struct GGMLRunnerContext {
     bool conv2d_direct_enabled                    = false;
     bool circular_x_enabled                       = false;
     bool circular_y_enabled                       = false;
-    std::shared_ptr<WeightAdapter> weight_adapter = nullptr;
 };
 
 struct GGMLRunner {
@@ -1579,8 +1545,6 @@ protected:
 
     struct ggml_context* compute_ctx    = nullptr;
     struct ggml_gallocr* compute_allocr = nullptr;
-
-    std::shared_ptr<WeightAdapter> weight_adapter = nullptr;
 
     std::vector<float> one_vec = {1.f};
     ggml_tensor* one_tensor    = nullptr;
@@ -1672,9 +1636,6 @@ protected:
     }
 
     struct ggml_cgraph* new_graph_custom(size_t graph_size) {
-        if (weight_adapter) {
-            graph_size += weight_adapter->get_extra_graph_size();
-        }
         return ggml_new_graph_custom(compute_ctx, graph_size, false);
     }
 
@@ -1875,7 +1836,6 @@ public:
         runner_ctx.conv2d_direct_enabled = conv2d_direct_enabled;
         runner_ctx.circular_x_enabled    = circular_x_enabled;
         runner_ctx.circular_y_enabled    = circular_y_enabled;
-        runner_ctx.weight_adapter        = weight_adapter;
         return runner_ctx;
     }
 
@@ -2022,10 +1982,6 @@ public:
     void set_circular_axes(bool circular_x, bool circular_y) {
         circular_x_enabled = circular_x;
         circular_y_enabled = circular_y;
-    }
-
-    void set_weight_adapter(const std::shared_ptr<WeightAdapter>& adapter) {
-        weight_adapter = adapter;
     }
 };
 
@@ -2177,13 +2133,7 @@ public:
         if (bias) {
             b = params["bias"];
         }
-        if (ctx->weight_adapter) {
-            WeightAdapter::ForwardParams forward_params;
-            forward_params.op_type               = WeightAdapter::ForwardParams::op_type_t::OP_LINEAR;
-            forward_params.linear.force_prec_f32 = force_prec_f32;
-            forward_params.linear.scale          = scale;
-            return ctx->weight_adapter->forward_with_lora(ctx->ggml_ctx, x, w, b, prefix, forward_params);
-        }
+
         return ggml_ext_linear(ctx->ggml_ctx, x, w, b, force_prec_f32, scale);
     }
 };
@@ -2285,21 +2235,7 @@ public:
         if (bias) {
             b = params["bias"];
         }
-        if (ctx->weight_adapter) {
-            WeightAdapter::ForwardParams forward_params;
-            forward_params.op_type           = WeightAdapter::ForwardParams::op_type_t::OP_CONV2D;
-            forward_params.conv2d.s0         = stride.second;
-            forward_params.conv2d.s1         = stride.first;
-            forward_params.conv2d.p0         = padding.second;
-            forward_params.conv2d.p1         = padding.first;
-            forward_params.conv2d.d0         = dilation.second;
-            forward_params.conv2d.d1         = dilation.first;
-            forward_params.conv2d.direct     = ctx->conv2d_direct_enabled;
-            forward_params.conv2d.circular_x = ctx->circular_x_enabled;
-            forward_params.conv2d.circular_y = ctx->circular_y_enabled;
-            forward_params.conv2d.scale      = scale;
-            return ctx->weight_adapter->forward_with_lora(ctx->ggml_ctx, x, w, b, prefix, forward_params);
-        }
+
         return ggml_ext_conv_2d(ctx->ggml_ctx,
                                 x,
                                 w,
@@ -2361,17 +2297,8 @@ public:
     struct ggml_tensor* forward(GGMLRunnerContext* ctx, struct ggml_tensor* x) {
         struct ggml_tensor* w = params["weight"];
         struct ggml_tensor* b = nullptr;
-        if (ctx->weight_adapter) {
-            w = ctx->weight_adapter->patch_weight(ctx->ggml_ctx, w, prefix + "weight");
-            if (w->type != GGML_TYPE_F16) {
-                w = ggml_cast(ctx->ggml_ctx, w, GGML_TYPE_F16);
-            }
-        }
         if (bias) {
             b = params["bias"];
-            if (ctx->weight_adapter) {
-                b = ctx->weight_adapter->patch_weight(ctx->ggml_ctx, b, prefix + "bias");
-            }
         }
         return ggml_ext_conv_3d(ctx->ggml_ctx, x, w, b, in_channels,
                                 std::get<2>(stride), std::get<1>(stride), std::get<0>(stride),
@@ -2416,14 +2343,8 @@ public:
 
         if (elementwise_affine) {
             w = params["weight"];
-            if (ctx->weight_adapter) {
-                w = ctx->weight_adapter->patch_weight(ctx->ggml_ctx, w, prefix + "weight");
-            }
             if (bias) {
                 b = params["bias"];
-                if (ctx->weight_adapter) {
-                    b = ctx->weight_adapter->patch_weight(ctx->ggml_ctx, b, prefix + "bias");
-                }
             }
         }
         return ggml_ext_layer_norm(ctx->ggml_ctx, x, w, b, eps);
@@ -2464,10 +2385,6 @@ public:
         if (affine) {
             w = params["weight"];
             b = params["bias"];
-            if (ctx->weight_adapter) {
-                w = ctx->weight_adapter->patch_weight(ctx->ggml_ctx, w, prefix + "weight");
-                b = ctx->weight_adapter->patch_weight(ctx->ggml_ctx, b, prefix + "bias");
-            }
         }
         return ggml_ext_group_norm(ctx->ggml_ctx, x, w, b, num_groups);
     }
@@ -2499,9 +2416,7 @@ public:
 
     struct ggml_tensor* forward(GGMLRunnerContext* ctx, struct ggml_tensor* x) {
         struct ggml_tensor* w = params["weight"];
-        if (ctx->weight_adapter) {
-            w = ctx->weight_adapter->patch_weight(ctx->ggml_ctx, w, prefix + "weight");
-        }
+
         x = ggml_rms_norm(ctx->ggml_ctx, x, eps);
         x = ggml_mul_inplace(ctx->ggml_ctx, x, w);
         return x;

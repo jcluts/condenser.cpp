@@ -35,7 +35,6 @@ struct Conditioner {
     virtual void get_param_tensors(std::map<std::string, struct ggml_tensor*>& tensors)    = 0;
     virtual size_t get_params_buffer_size()                                                = 0;
     virtual void set_flash_attention_enabled(bool enabled)                                 = 0;
-    virtual void set_weight_adapter(const std::shared_ptr<WeightAdapter>& adapter) {}
     virtual std::tuple<SDCondition, std::vector<bool>> get_learned_condition_with_trigger(ggml_context* work_ctx,
                                                                                           int n_threads,
                                                                                           const ConditionerParams& conditioner_params) {
@@ -120,13 +119,6 @@ struct FrozenCLIPEmbedderWithCustomWords : public Conditioner {
         text_model->set_flash_attention_enabled(enabled);
         if (sd_version_is_sdxl(version)) {
             text_model2->set_flash_attention_enabled(enabled);
-        }
-    }
-
-    void set_weight_adapter(const std::shared_ptr<WeightAdapter>& adapter) override {
-        text_model->set_weight_adapter(adapter);
-        if (sd_version_is_sdxl(version)) {
-            text_model2->set_weight_adapter(adapter);
         }
     }
 
@@ -803,17 +795,6 @@ struct SD3CLIPEmbedder : public Conditioner {
         }
     }
 
-    void set_weight_adapter(const std::shared_ptr<WeightAdapter>& adapter) override {
-        if (clip_l) {
-            clip_l->set_weight_adapter(adapter);
-        }
-        if (clip_g) {
-            clip_g->set_weight_adapter(adapter);
-        }
-        if (t5) {
-            t5->set_weight_adapter(adapter);
-        }
-    }
 
     std::vector<std::pair<std::vector<int>, std::vector<float>>> tokenize(std::string text,
                                                                           size_t max_length = 0,
@@ -1220,14 +1201,6 @@ struct FluxCLIPEmbedder : public Conditioner {
         }
     }
 
-    void set_weight_adapter(const std::shared_ptr<WeightAdapter>& adapter) {
-        if (clip_l) {
-            clip_l->set_weight_adapter(adapter);
-        }
-        if (t5) {
-            t5->set_weight_adapter(adapter);
-        }
-    }
 
     std::vector<std::pair<std::vector<int>, std::vector<float>>> tokenize(std::string text,
                                                                           size_t max_length = 0,
@@ -1475,11 +1448,6 @@ struct T5CLIPEmbedder : public Conditioner {
         }
     }
 
-    void set_weight_adapter(const std::shared_ptr<WeightAdapter>& adapter) override {
-        if (t5) {
-            t5->set_weight_adapter(adapter);
-        }
-    }
 
     std::tuple<std::vector<int>, std::vector<float>, std::vector<float>> tokenize(std::string text,
                                                                                   size_t max_length = 0,
@@ -1652,7 +1620,9 @@ struct LLMEmbedder : public Conditioner {
 
         arch = LLM::LLMArch::QWEN3;
 
+        LOG_DEBUG("LLMEmbedder: Creating Qwen2Tokenizer");
         tokenizer = std::make_shared<LLM::Qwen2Tokenizer>();
+        LOG_DEBUG("LLMEmbedder: Qwen2Tokenizer created successfully");
 
         llm = std::make_shared<LLM::LLMRunner>(arch,
                                                backend,
@@ -1684,12 +1654,6 @@ struct LLMEmbedder : public Conditioner {
         llm->set_flash_attention_enabled(enabled);
     }
 
-    void set_weight_adapter(const std::shared_ptr<WeightAdapter>& adapter) override {
-        if (llm) {
-            llm->set_weight_adapter(adapter);
-        }
-    }
-
     std::tuple<std::vector<int>, std::vector<float>> tokenize(std::string text,
                                                               std::pair<int, int> attn_range,
                                                               size_t max_length = 0,
@@ -1710,18 +1674,24 @@ struct LLMEmbedder : public Conditioner {
                 ss << "['" << item.first << "', " << item.second << "], ";
             }
             ss << "]";
-            LOG_DEBUG("parse '%s' to %s", text.c_str(), ss.str().c_str());
+            std::string parsed_str = ss.str();
+            LOG_DEBUG("parse '%s' to %s", text.c_str(), parsed_str.c_str());
         }
 
         std::vector<int> tokens;
         std::vector<float> weights;
-        for (const auto& item : parsed_attention) {
+        LOG_DEBUG("LLMEmbedder tokenize: processing %zu parsed_attention items", parsed_attention.size());
+        for (size_t idx = 0; idx < parsed_attention.size(); idx++) {
+            const auto& item = parsed_attention[idx];
             const std::string& curr_text = item.first;
             float curr_weight            = item.second;
+            LOG_DEBUG("LLMEmbedder tokenize: item %zu, text length=%zu, weight=%.2f", idx, curr_text.size(), curr_weight);
             std::vector<int> curr_tokens = tokenizer->tokenize(curr_text, nullptr);
+            LOG_DEBUG("LLMEmbedder tokenize: item %zu produced %zu tokens", idx, curr_tokens.size());
             tokens.insert(tokens.end(), curr_tokens.begin(), curr_tokens.end());
             weights.insert(weights.end(), curr_tokens.size(), curr_weight);
         }
+        LOG_DEBUG("LLMEmbedder tokenize: total tokens=%zu, total weights=%zu", tokens.size(), weights.size());
 
         tokenizer->pad_tokens(tokens, weights, max_length, padding);
 
@@ -1881,10 +1851,16 @@ struct LLMEmbedder : public Conditioner {
             weights                 = std::get<1>(tokens_and_weights);
         }
 
+        LOG_DEBUG("LLMEmbedder: tokens.size()=%zu, weights.size()=%zu, max_length=%d", 
+                 tokens.size(), weights.size(), max_length);
+
         int64_t t0                        = ggml_time_ms();
         struct ggml_tensor* hidden_states = nullptr;  // [N, n_token, 3584]
 
+        LOG_DEBUG("LLMEmbedder: About to create input_ids from %zu tokens", tokens.size());
         auto input_ids = vector_to_ggml_tensor_i32(work_ctx, tokens);
+        LOG_DEBUG("LLMEmbedder: input_ids shape [%lld, %lld, %lld, %lld]", 
+                 input_ids->ne[0], input_ids->ne[1], input_ids->ne[2], input_ids->ne[3]);
 
         ggml_tensor* attention_mask = nullptr;
         if (!mask.empty()) {
@@ -1900,6 +1876,9 @@ struct LLMEmbedder : public Conditioner {
             });
         }
 
+        LOG_DEBUG("LLMEmbedder: About to call llm->compute with input_ids [%lld], attention_mask %s, %zu out_layers",
+                 input_ids->ne[0], attention_mask ? "present" : "null", out_layers.size());
+
         llm->compute(n_threads,
                      input_ids,
                      attention_mask,
@@ -1907,8 +1886,19 @@ struct LLMEmbedder : public Conditioner {
                      out_layers,
                      &hidden_states,
                      work_ctx);
+        LOG_DEBUG("LLMEmbedder: llm->compute completed");
         {
             auto tensor         = hidden_states;
+            LOG_DEBUG("LLMEmbedder: hidden_states shape [%lld, %lld, %lld, %lld], weights.size()=%zu, tokens.size()=%zu", 
+                     tensor->ne[0], tensor->ne[1], tensor->ne[2], tensor->ne[3], weights.size(), tokens.size());
+            
+            // Ensure weights vector matches the sequence length
+            if (weights.size() < tensor->ne[1]) {
+                LOG_WARN("LLMEmbedder: weights.size()=%zu < hidden_states.ne[1]=%lld, padding weights with 1.0",
+                        weights.size(), tensor->ne[1]);
+                weights.resize(tensor->ne[1], 1.0f);
+            }
+            
             float original_mean = ggml_ext_tensor_mean(tensor);
             for (int i2 = 0; i2 < tensor->ne[2]; i2++) {
                 for (int i1 = 0; i1 < tensor->ne[1]; i1++) {

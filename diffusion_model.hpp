@@ -33,141 +33,11 @@ struct DiffusionModel {
     virtual void free_compute_buffer()                                                  = 0;
     virtual void get_param_tensors(std::map<std::string, struct ggml_tensor*>& tensors) = 0;
     virtual size_t get_params_buffer_size()                                             = 0;
-    virtual void set_weight_adapter(const std::shared_ptr<WeightAdapter>& adapter){};
     virtual int64_t get_adm_in_channels()                            = 0;
     virtual void set_flash_attention_enabled(bool enabled)           = 0;
     virtual void set_circular_axes(bool circular_x, bool circular_y) = 0;
 };
 
-struct UNetModel : public DiffusionModel {
-    UNetModelRunner unet;
-
-    UNetModel(ggml_backend_t backend,
-              bool offload_params_to_cpu,
-              const String2TensorStorage& tensor_storage_map = {},
-              SDVersion version                              = VERSION_SD1)
-        : unet(backend, offload_params_to_cpu, tensor_storage_map, "model.diffusion_model", version) {
-    }
-
-    std::string get_desc() override {
-        return unet.get_desc();
-    }
-
-    void alloc_params_buffer() override {
-        unet.alloc_params_buffer();
-    }
-
-    void free_params_buffer() override {
-        unet.free_params_buffer();
-    }
-
-    void free_compute_buffer() override {
-        unet.free_compute_buffer();
-    }
-
-    void get_param_tensors(std::map<std::string, struct ggml_tensor*>& tensors) override {
-        unet.get_param_tensors(tensors, "model.diffusion_model");
-    }
-
-    size_t get_params_buffer_size() override {
-        return unet.get_params_buffer_size();
-    }
-
-    void set_weight_adapter(const std::shared_ptr<WeightAdapter>& adapter) override {
-        unet.set_weight_adapter(adapter);
-    }
-
-    int64_t get_adm_in_channels() override {
-        return unet.unet.adm_in_channels;
-    }
-
-    void set_flash_attention_enabled(bool enabled) {
-        unet.set_flash_attention_enabled(enabled);
-    }
-
-    void set_circular_axes(bool circular_x, bool circular_y) override {
-        unet.set_circular_axes(circular_x, circular_y);
-    }
-
-    bool compute(int n_threads,
-                 DiffusionParams diffusion_params,
-                 struct ggml_tensor** output     = nullptr,
-                 struct ggml_context* output_ctx = nullptr) override {
-        return unet.compute(n_threads,
-                            diffusion_params.x,
-                            diffusion_params.timesteps,
-                            diffusion_params.context,
-                            diffusion_params.c_concat,
-                            diffusion_params.y,
-                            diffusion_params.num_video_frames,
-                            diffusion_params.controls,
-                            diffusion_params.control_strength, output, output_ctx);
-    }
-};
-
-struct MMDiTModel : public DiffusionModel {
-    MMDiTRunner mmdit;
-
-    MMDiTModel(ggml_backend_t backend,
-               bool offload_params_to_cpu,
-               const String2TensorStorage& tensor_storage_map = {})
-        : mmdit(backend, offload_params_to_cpu, tensor_storage_map, "model.diffusion_model") {
-    }
-
-    std::string get_desc() override {
-        return mmdit.get_desc();
-    }
-
-    void alloc_params_buffer() override {
-        mmdit.alloc_params_buffer();
-    }
-
-    void free_params_buffer() override {
-        mmdit.free_params_buffer();
-    }
-
-    void free_compute_buffer() override {
-        mmdit.free_compute_buffer();
-    }
-
-    void get_param_tensors(std::map<std::string, struct ggml_tensor*>& tensors) override {
-        mmdit.get_param_tensors(tensors, "model.diffusion_model");
-    }
-
-    size_t get_params_buffer_size() override {
-        return mmdit.get_params_buffer_size();
-    }
-
-    void set_weight_adapter(const std::shared_ptr<WeightAdapter>& adapter) override {
-        mmdit.set_weight_adapter(adapter);
-    }
-
-    int64_t get_adm_in_channels() override {
-        return 768 + 1280;
-    }
-
-    void set_flash_attention_enabled(bool enabled) {
-        mmdit.set_flash_attention_enabled(enabled);
-    }
-
-    void set_circular_axes(bool circular_x, bool circular_y) override {
-        mmdit.set_circular_axes(circular_x, circular_y);
-    }
-
-    bool compute(int n_threads,
-                 DiffusionParams diffusion_params,
-                 struct ggml_tensor** output     = nullptr,
-                 struct ggml_context* output_ctx = nullptr) override {
-        return mmdit.compute(n_threads,
-                             diffusion_params.x,
-                             diffusion_params.timesteps,
-                             diffusion_params.context,
-                             diffusion_params.y,
-                             output,
-                             output_ctx,
-                             diffusion_params.skip_layers);
-    }
-};
 
 struct FluxModel : public DiffusionModel {
     Flux::FluxRunner flux;
@@ -202,10 +72,6 @@ struct FluxModel : public DiffusionModel {
 
     size_t get_params_buffer_size() override {
         return flux.get_params_buffer_size();
-    }
-
-    void set_weight_adapter(const std::shared_ptr<WeightAdapter>& adapter) override {
-        flux.set_weight_adapter(adapter);
     }
 
     int64_t get_adm_in_channels() override {
