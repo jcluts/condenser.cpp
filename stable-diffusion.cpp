@@ -411,6 +411,17 @@ public:
                 vae_backend = backend;
             }
 
+            // Initialize VAE (AutoEncoderKL) for FLUX2_KLEIN - AFTER vae_backend is set
+            first_stage_model = std::make_shared<AutoEncoderKL>(vae_backend,
+                                                                 offload_params_to_cpu,
+                                                                 tensor_storage_map,
+                                                                 "first_stage_model",
+                                                                 vae_decode_only,
+                                                                 false,
+                                                                 version);
+            first_stage_model->alloc_params_buffer();
+            first_stage_model->get_param_tensors(tensors, "first_stage_model");
+
 
             if (sd_ctx_params->flash_attn) {
                 LOG_INFO("Using flash attention");
@@ -706,143 +717,6 @@ public:
         sd_set_progress_callback(cb, cbd);
     }
 
-    void preview_image(ggml_context* work_ctx,
-                       int step,
-                       struct ggml_tensor* latents,
-                       enum SDVersion version,
-                       preview_t preview_mode,
-                       ggml_tensor* result,
-                       std::function<void(int, int, sd_image_t*, bool, void*)> step_callback,
-                       void* step_callback_data,
-                       bool is_noisy) {
-        const uint32_t channel = 3;
-        uint32_t width         = static_cast<uint32_t>(latents->ne[0]);
-        uint32_t height        = static_cast<uint32_t>(latents->ne[1]);
-        uint32_t dim           = static_cast<uint32_t>(latents->ne[ggml_n_dims(latents) - 1]);
-
-        if (preview_mode == PREVIEW_PROJ) {
-            int patch_sz                           = 1;
-            const float(*latent_rgb_proj)[channel] = nullptr;
-            float* latent_rgb_bias                 = nullptr;
-
-            if (dim == 128) {
-                if (sd_version_is_flux2(version)) {
-                    latent_rgb_proj = flux2_latent_rgb_proj;
-                    latent_rgb_bias = flux2_latent_rgb_bias;
-                    patch_sz        = 2;
-                }
-            } else if (dim == 48) {
-                if (sd_version_is_wan(version)) {
-                    latent_rgb_proj = wan_22_latent_rgb_proj;
-                    latent_rgb_bias = wan_22_latent_rgb_bias;
-                } else {
-                    LOG_WARN("No latent to RGB projection known for this model");
-                    // unknown model
-                    return;
-                }
-            } else if (dim == 16) {
-                // 16 channels VAE -> Flux or SD3
-
-                if (sd_version_is_sd3(version)) {
-                    latent_rgb_proj = sd3_latent_rgb_proj;
-                    latent_rgb_bias = sd3_latent_rgb_bias;
-                } else if (sd_version_is_flux(version) || sd_version_is_z_image(version)) {
-                    latent_rgb_proj = flux_latent_rgb_proj;
-                    latent_rgb_bias = flux_latent_rgb_bias;
-                } else if (sd_version_is_wan(version) || sd_version_is_qwen_image(version)) {
-                    latent_rgb_proj = wan_21_latent_rgb_proj;
-                    latent_rgb_bias = wan_21_latent_rgb_bias;
-                } else {
-                    LOG_WARN("No latent to RGB projection known for this model");
-                    // unknown model
-                    return;
-                }
-
-            } else if (dim == 4) {
-                // 4 channels VAE
-                if (sd_version_is_sdxl(version)) {
-                    latent_rgb_proj = sdxl_latent_rgb_proj;
-                    latent_rgb_bias = sdxl_latent_rgb_bias;
-                } else if (sd_version_is_sd1(version) || sd_version_is_sd2(version)) {
-                    latent_rgb_proj = sd_latent_rgb_proj;
-                    latent_rgb_bias = sd_latent_rgb_bias;
-                } else {
-                    // unknown model
-                    LOG_WARN("No latent to RGB projection known for this model");
-                    return;
-                }
-            } else if (dim == 3) {
-                // Do nothing, assuming already RGB latents
-            } else {
-                LOG_WARN("No latent to RGB projection known for this model");
-                // unknown latent space
-                return;
-            }
-
-            uint32_t frames = 1;
-            if (ggml_n_dims(latents) == 4) {
-                frames = static_cast<uint32_t>(latents->ne[2]);
-            }
-
-            uint32_t img_width  = width * patch_sz;
-            uint32_t img_height = height * patch_sz;
-
-            uint8_t* data = (uint8_t*)malloc(frames * img_width * img_height * channel * sizeof(uint8_t));
-
-            preview_latent_video(data, latents, latent_rgb_proj, latent_rgb_bias, patch_sz);
-            sd_image_t* images = (sd_image_t*)malloc(frames * sizeof(sd_image_t));
-            for (uint32_t i = 0; i < frames; i++) {
-                images[i] = {img_width, img_height, channel, data + i * img_width * img_height * channel};
-            }
-            step_callback(step, frames, images, is_noisy, step_callback_data);
-            free(data);
-            free(images);
-        } else {
-            if (preview_mode == PREVIEW_VAE) {
-                process_latent_out(latents);
-                if (vae_tiling_params.enabled) {
-                    // split latent in 32x32 tiles and compute in several steps
-                    auto on_tiling = [&](ggml_tensor* in, ggml_tensor* out, bool init) {
-                        first_stage_model->compute(n_threads, in, true, &out, nullptr);
-                    };
-                    silent_tiling(latents, result, get_vae_scale_factor(), 32, 0.5f, on_tiling);
-
-                } else {
-                    first_stage_model->compute(n_threads, latents, true, &result, work_ctx);
-                }
-
-                first_stage_model->free_compute_buffer();
-                process_vae_output_tensor(result);
-                process_latent_in(latents);
-            } else {
-                return;
-            }
-
-            ggml_ext_tensor_clamp_inplace(result, 0.0f, 1.0f);
-            uint32_t frames = 1;
-            if (ggml_n_dims(latents) == 4) {
-                frames = static_cast<uint32_t>(result->ne[2]);
-            }
-
-            sd_image_t* images = (sd_image_t*)malloc(frames * sizeof(sd_image_t));
-            // print_ggml_tensor(result,true);
-            for (size_t i = 0; i < frames; i++) {
-                images[i].width   = static_cast<uint32_t>(result->ne[0]);
-                images[i].height  = static_cast<uint32_t>(result->ne[1]);
-                images[i].channel = 3;
-                images[i].data    = ggml_tensor_to_sd_image(result, static_cast<int>(i), ggml_n_dims(latents) == 4);
-            }
-
-            step_callback(step, frames, images, is_noisy, step_callback_data);
-
-            ggml_ext_tensor_scale_inplace(result, 0);
-            for (uint32_t i = 0; i < frames; i++) {
-                free(images[i].data);
-            }
-
-            free(images);
-        }
-    }
 
     ggml_tensor* sample(ggml_context* work_ctx,
                         std::shared_ptr<DiffusionModel> work_diffusion_model,
@@ -1232,11 +1106,6 @@ public:
             if (denoise_mask != nullptr && version == VERSION_WAN2_2_TI2V) {
                 apply_mask(noised_input, init_latent, denoise_mask);
             }
-            if (sd_preview_cb != nullptr && sd_should_preview_noisy()) {
-                if (step % sd_get_preview_interval() == 0) {
-                    preview_image(work_ctx, step, noised_input, version, sd_preview_mode, preview_tensor, sd_preview_cb, sd_preview_cb_data, true);
-                }
-            }
 
             std::vector<struct ggml_tensor*> controls;
 
@@ -1374,12 +1243,6 @@ public:
 
             if (denoise_mask != nullptr) {
                 apply_mask(denoised, init_latent, denoise_mask);
-            }
-
-            if (sd_preview_cb != nullptr && sd_should_preview_denoised()) {
-                if (step % sd_get_preview_interval() == 0) {
-                    preview_image(work_ctx, step, denoised, version, sd_preview_mode, preview_tensor, sd_preview_cb, sd_preview_cb_data, false);
-                }
             }
 
             int64_t t1 = ggml_time_us();
@@ -1825,33 +1688,24 @@ public:
         int64_t H                  = x->ne[1] * vae_scale_factor;
         int64_t C                  = 3;
         ggml_tensor* result        = nullptr;
-        if (decode_video) {
-            int64_t T = x->ne[2];
-            if (sd_version_is_wan(version)) {
-                T = ((T - 1) * 4) + 1;
-            }
-            result = ggml_new_tensor_4d(work_ctx,
-                                        GGML_TYPE_F32,
-                                        W,
-                                        H,
-                                        T,
-                                        3);
-        } else {
-            result = ggml_new_tensor_4d(work_ctx,
-                                        GGML_TYPE_F32,
-                                        W,
-                                        H,
-                                        C,
-                                        x->ne[3]);
-        }
-        int64_t t0 = ggml_time_ms();
+        LOG_DEBUG("Decoding first stage");
+        result = ggml_new_tensor_4d(work_ctx,
+                                    GGML_TYPE_F32,
+                                    W,
+                                    H,
+                                    C,
+                                    x->ne[3]);
 
+        int64_t t0 = ggml_time_ms();
+        LOG_DEBUG("computing vae decode graph...");
         if (sd_version_is_qwen_image(version)) {
             x = ggml_reshape_4d(work_ctx, x, x->ne[0], x->ne[1], 1, x->ne[2] * x->ne[3]);
         }
+        LOG_DEBUG("Decoding first stage: after reshape");
         process_latent_out(x);
         // x = load_tensor_from_file(work_ctx, "wan_vae_z.bin");
         if (vae_tiling_params.enabled) {
+            LOG_DEBUG("VAE decode with tiling");
             float tile_overlap;
             int tile_size_x, tile_size_y;
             get_tile_sizes(tile_size_x, tile_size_y, tile_overlap, vae_tiling_params, x->ne[0], x->ne[1]);
@@ -1860,12 +1714,17 @@ public:
 
             // split latent in 32x32 tiles and compute in several steps
             auto on_tiling = [&](ggml_tensor* in, ggml_tensor* out, bool init) {
+                LOG_DEBUG("VAE on_tiling: About to call first_stage_model->compute");
                 first_stage_model->compute(n_threads, in, true, &out, nullptr);
+                LOG_DEBUG("VAE on_tiling: first_stage_model->compute returned");
             };
             sd_tiling_non_square(x, result, vae_scale_factor, tile_size_x, tile_size_y, tile_overlap, on_tiling);
         } else {
+            LOG_DEBUG("VAE decode without tiling");
             first_stage_model->compute(n_threads, x, true, &result, work_ctx);
         }
+
+        LOG_DEBUG("Decoding first stage: after compute");
         first_stage_model->free_compute_buffer();
         process_vae_output_tensor(result);
     
@@ -2559,7 +2418,9 @@ sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
     std::vector<struct ggml_tensor*> decoded_images;  // collect decoded images
     for (size_t i = 0; i < final_latents.size(); i++) {
         t1                      = ggml_time_ms();
+        LOG_DEBUG("decoding latent %" PRId64, i + 1);
         struct ggml_tensor* img = sd_ctx->sd->decode_first_stage(work_ctx, final_latents[i] /* x_0 */);
+        LOG_DEBUG("decoded latent %" PRId64, i + 1);
         // print_ggml_tensor(img);
         if (img != nullptr) {
             decoded_images.push_back(img);

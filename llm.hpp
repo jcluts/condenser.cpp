@@ -95,6 +95,7 @@ namespace LLM {
         BPETokenizer() = default;
 
         std::u32string bpe(const std::u32string& token) {
+            LOG_DEBUG("BPETokenizer::bpe() called with token length=%zu", token.size());
             std::vector<std::u32string> word;
 
             for (int i = 0; i < token.size(); i++) {
@@ -207,20 +208,30 @@ namespace LLM {
         }
 
         std::vector<int> encode(std::string text, on_new_token_cb_t on_new_token_cb = nullptr) {
+            LOG_DEBUG("BPETokenizer::encode() called with text length=%zu", text.size());
             std::string original_text = text;
             std::vector<int32_t> bpe_tokens;
             std::vector<std::string> token_strs;
 
+            LOG_DEBUG("BPETokenizer::encode() calling split_with_special_tokens");
             auto splited_texts = split_with_special_tokens(text, special_tokens);
+            LOG_DEBUG("BPETokenizer::encode() split_with_special_tokens returned %zu parts", splited_texts.size());
 
-            for (auto& splited_text : splited_texts) {
+            for (size_t split_idx = 0; split_idx < splited_texts.size(); split_idx++) {
+                auto& splited_text = splited_texts[split_idx];
+                LOG_DEBUG("BPETokenizer::encode() processing split %zu/%zu, length=%zu, text='%s'", split_idx+1, splited_texts.size(), splited_text.size(), splited_text.c_str());
                 if (is_special_token(splited_text)) {
+                    LOG_DEBUG("BPETokenizer::encode() split %zu is special token", split_idx+1);
                     bpe_tokens.push_back(encoder[utf8_to_utf32(splited_text)]);
                     token_strs.push_back(splited_text);
                     continue;
                 }
+                LOG_DEBUG("BPETokenizer::encode() split %zu calling token_split", split_idx+1);
                 auto tokens = token_split(splited_text);
-                for (auto& token : tokens) {
+                LOG_DEBUG("BPETokenizer::encode() split %zu token_split returned %zu tokens", split_idx+1, tokens.size());
+                for (size_t token_idx = 0; token_idx < tokens.size(); token_idx++) {
+                    auto& token = tokens[token_idx];
+                    LOG_DEBUG("BPETokenizer::encode() processing token %zu/%zu, length=%zu", token_idx+1, tokens.size(), token.size());
                     if (on_new_token_cb != nullptr) {
                         bool skip = on_new_token_cb(token, bpe_tokens);
                         if (skip) {
@@ -230,34 +241,59 @@ namespace LLM {
 
                     std::string token_str = token;
                     std::u32string utf32_token;
+                    LOG_DEBUG("BPETokenizer::encode() encoding token bytes to utf32");
                     for (int i = 0; i < token_str.length(); i++) {
                         unsigned char b = token_str[i];
                         utf32_token += byte_encoder[b];
                     }
+                    LOG_DEBUG("BPETokenizer::encode() calling bpe() on utf32_token");
                     auto bpe_strs = bpe(utf32_token);
+                    LOG_DEBUG("BPETokenizer::encode() bpe() returned, bpe_strs length=%zu", bpe_strs.size());
                     size_t start  = 0;
                     size_t pos;
+                    LOG_DEBUG("BPETokenizer::encode() splitting bpe result by spaces");
                     while ((pos = bpe_strs.find(' ', start)) != std::u32string::npos) {
+                        LOG_DEBUG("BPETokenizer::encode() found space at pos=%zu", pos);
                         auto bpe_str = bpe_strs.substr(start, pos - start);
+                        LOG_DEBUG("BPETokenizer::encode() pushing bpe_str to encoder map");
+                        if (encoder.find(bpe_str) == encoder.end()) {
+                            LOG_WARN("BPETokenizer::encode() encoder does not contain bpe_str in while loop, skipping");
+                            start = pos + 1;
+                            continue;
+                        }
                         bpe_tokens.push_back(encoder[bpe_str]);
                         token_strs.push_back(utf32_to_utf8(bpe_str));
 
                         start = pos + 1;
                     }
+                    LOG_DEBUG("BPETokenizer::encode() processing final bpe_str");
                     auto bpe_str = bpe_strs.substr(start, bpe_strs.size() - start);
+                    LOG_DEBUG("BPETokenizer::encode() final bpe_str length=%zu, pushing to encoder", bpe_str.size());
+                    if (encoder.find(bpe_str) == encoder.end()) {
+                        LOG_WARN("BPETokenizer::encode() encoder does not contain bpe_str, skipping");
+                        continue;
+                    }
                     bpe_tokens.push_back(encoder[bpe_str]);
+                    LOG_DEBUG("BPETokenizer::encode() encoder lookup succeeded, calling utf32_to_utf8");
                     token_strs.push_back(utf32_to_utf8(bpe_str));
+                    LOG_DEBUG("BPETokenizer::encode() utf32_to_utf8 succeeded");
                 }
+                LOG_DEBUG("BPETokenizer::encode() finished processing all tokens for split %zu", split_idx+1);
             }
+            LOG_DEBUG("BPETokenizer::encode() finished processing all splits");
 
+            LOG_DEBUG("BPETokenizer::encode() building debug string, token_strs.size()=%zu", token_strs.size());
             std::stringstream ss;
             ss << "[";
-            for (auto token : token_strs) {
-                ss << "\"" << token << "\", ";
+            for (size_t i = 0; i < token_strs.size(); i++) {
+                LOG_DEBUG("BPETokenizer::encode() adding token_str %zu to stringstream", i);
+                ss << "\"" << token_strs[i] << "\", ";
             }
             ss << "]";
+            LOG_DEBUG("BPETokenizer::encode() debug string built");
             //LOG_DEBUG("split prompt \"%s\" to tokens %s", original_text.c_str(), ss.str().c_str());
             // printf("split prompt \"%s\" to tokens %s \n", original_text.c_str(), ss.str().c_str());
+            LOG_DEBUG("BPETokenizer::encode() returning bpe_tokens");
             return bpe_tokens;
         }
     };

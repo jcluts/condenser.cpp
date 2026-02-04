@@ -925,7 +925,7 @@ std::vector<std::string> token_split(const std::string& text) {
             while (i < cps.size() && is_space(cps[i])) {
                 token += codepoint_to_utf8(cps[i]);
                 ++i;
-                if (cps[i] == U'\r' || cps[i] == U'\n') {
+                if (i < cps.size() && (cps[i] == U'\r' || cps[i] == U'\n')) {
                     break;
                 }
             }

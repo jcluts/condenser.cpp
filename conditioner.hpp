@@ -1685,8 +1685,27 @@ struct LLMEmbedder : public Conditioner {
             const auto& item = parsed_attention[idx];
             const std::string& curr_text = item.first;
             float curr_weight            = item.second;
-            LOG_DEBUG("LLMEmbedder tokenize: item %zu, text length=%zu, weight=%.2f", idx, curr_text.size(), curr_weight);
-            std::vector<int> curr_tokens = tokenizer->tokenize(curr_text, nullptr);
+            LOG_DEBUG("LLMEmbedder tokenize: item %zu, text length=%zu, weight=%.2f, text='%s'", 
+                     idx, curr_text.size(), curr_weight, curr_text.c_str());
+            
+            // WORKAROUND: Skip empty or whitespace-only strings that might cause tokenizer crashes
+            if (curr_text.empty() || curr_text.find_first_not_of(" \t\n\r") == std::string::npos) {
+                LOG_DEBUG("LLMEmbedder tokenize: Skipping empty/whitespace item %zu", idx);
+                continue;
+            }
+            
+            LOG_DEBUG("LLMEmbedder tokenize: About to call tokenizer->tokenize() for item %zu", idx);
+            std::vector<int> curr_tokens;
+            try {
+                curr_tokens = tokenizer->tokenize(curr_text, nullptr);
+                LOG_DEBUG("LLMEmbedder tokenize: tokenizer->tokenize() returned successfully for item %zu", idx);
+            } catch (const std::exception& e) {
+                LOG_ERROR("LLMEmbedder tokenize: EXCEPTION in tokenizer->tokenize() for item %zu: %s", idx, e.what());
+                throw;
+            } catch (...) {
+                LOG_ERROR("LLMEmbedder tokenize: UNKNOWN EXCEPTION in tokenizer->tokenize() for item %zu", idx);
+                throw;
+            }
             LOG_DEBUG("LLMEmbedder tokenize: item %zu produced %zu tokens", idx, curr_tokens.size());
             tokens.insert(tokens.end(), curr_tokens.begin(), curr_tokens.end());
             weights.insert(weights.end(), curr_tokens.size(), curr_weight);
