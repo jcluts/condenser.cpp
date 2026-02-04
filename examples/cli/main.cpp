@@ -17,8 +17,6 @@
 
 #include "common/common.hpp"
 
-#include "avi_writer.h"
-
 const char* previews_str[] = {
     "none",
     "proj",
@@ -89,10 +87,6 @@ struct SDCliParams {
              "--color",
              "colors the logging tags according to level",
              true, &color},
-            {"",
-             "--taesd-preview-only",
-             std::string("prevents usage of taesd for decoding the final image. (for use with --preview ") + previews_str[PREVIEW_TAE] + ")",
-             true, &taesd_preview},
             {"",
              "--preview-noisy",
              "enables previewing noisy inputs of the models rather than the denoised outputs",
@@ -344,11 +338,9 @@ void step_callback(int step, int frame_count, sd_image_t* image, bool is_noisy, 
     SDCliParams* cli_params = (SDCliParams*)data;
     // is_noisy is set to true if the preview corresponds to noisy latents, false if it's denoised latents
     // unused in this app, it will either be always noisy or always denoised here
-    if (frame_count == 1) {
-        stbi_write_png(cli_params->preview_path.c_str(), image->width, image->height, image->channel, image->data, 0);
-    } else {
-        create_mjpg_avi_from_sd_images(cli_params->preview_path.c_str(), image, frame_count, cli_params->preview_fps);
-    }
+
+    stbi_write_png(cli_params->preview_path.c_str(), image->width, image->height, image->channel, image->data, 0);
+
 }
 
 std::string format_frame_idx(std::string pattern, int frame_idx) {
@@ -434,16 +426,6 @@ bool save_results(const SDCliParams& cli_params,
         return true;
     }
 
-    if (cli_params.mode == VID_GEN && num_results > 1) {
-        if (ext_lower != ".avi")
-            ext = ".avi";
-        fs::path video_path = base_path;
-        video_path += ext;
-        create_mjpg_avi_from_sd_images(video_path.string().c_str(), results, num_results, gen_params.fps);
-        LOG_INFO("save result MJPG AVI video to '%s'", video_path.string().c_str());
-        return true;
-    }
-
     if (!is_jpg && ext_lower != ".png")
         ext = ".png";
 
@@ -470,19 +452,7 @@ int main(int argc, const char* argv[]) {
     SDGenerationParams gen_params;
 
     parse_args(argc, argv, cli_params, ctx_params, gen_params);
-    if (gen_params.video_frames > 4) {
-        size_t last_dot_pos   = cli_params.preview_path.find_last_of(".");
-        std::string base_path = cli_params.preview_path;
-        std::string file_ext  = "";
-        if (last_dot_pos != std::string::npos) {  // filename has extension
-            base_path = cli_params.preview_path.substr(0, last_dot_pos);
-            file_ext  = cli_params.preview_path.substr(last_dot_pos);
-            std::transform(file_ext.begin(), file_ext.end(), file_ext.begin(), ::tolower);
-        }
-        if (file_ext == ".png") {
-            cli_params.preview_path = base_path + ".avi";
-        }
-    }
+
     cli_params.preview_fps = gen_params.fps;
     if (cli_params.preview_method == PREVIEW_PROJ)
         cli_params.preview_fps /= 4;
@@ -640,18 +610,6 @@ int main(int argc, const char* argv[]) {
                              0.8f,
                              1.0f,
                              false);
-        }
-    }
-
-    if (!gen_params.control_video_path.empty()) {
-        if (!load_images_from_dir(gen_params.control_video_path,
-                                  control_frames,
-                                  gen_params.get_resolved_width(),
-                                  gen_params.get_resolved_height(),
-                                  gen_params.video_frames,
-                                  cli_params.verbose)) {
-            release_all_resources();
-            return 1;
         }
     }
 

@@ -2,7 +2,6 @@
 #define __DIFFUSION_MODEL_H__
 
 #include "flux.hpp"
-#include "mmdit.hpp"
 
 struct DiffusionParams {
     struct ggml_tensor* x                     = nullptr;

@@ -1284,11 +1284,9 @@ public:
         }
         int C = get_latent_channel();
         ggml_tensor* init_latent;
-        if (video) {
-            init_latent = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, W, H, T, C);
-        } else {
-            init_latent = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, W, H, C, 1);
-        }
+
+        init_latent = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, W, H, C, 1);
+
         ggml_set_f32(init_latent, shift_factor);
         return init_latent;
     }
