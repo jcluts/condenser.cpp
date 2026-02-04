@@ -741,32 +741,7 @@ int main(int argc, const char* argv[]) {
 
             results     = generate_image(sd_ctx, &img_gen_params);
             num_results = gen_params.batch_count;
-        } else if (cli_params.mode == VID_GEN) {
-            sd_vid_gen_params_t vid_gen_params = {
-                gen_params.lora_vec.data(),
-                static_cast<uint32_t>(gen_params.lora_vec.size()),
-                gen_params.prompt.c_str(),
-                gen_params.negative_prompt.c_str(),
-                gen_params.clip_skip,
-                init_image,
-                end_image,
-                control_frames.data(),
-                (int)control_frames.size(),
-                gen_params.get_resolved_width(),
-                gen_params.get_resolved_height(),
-                gen_params.sample_params,
-                gen_params.high_noise_sample_params,
-                gen_params.moe_boundary,
-                gen_params.strength,
-                gen_params.seed,
-                gen_params.video_frames,
-                gen_params.vace_strength,
-                ctx_params.vae_tiling_params,
-                gen_params.cache_params,
-            };
-
-            results = generate_video(sd_ctx, &vid_gen_params, &num_results);
-        }
+        } 
 
         if (results == nullptr) {
             LOG_ERROR("generate failed");

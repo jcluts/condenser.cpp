@@ -3,7 +3,6 @@
 
 #include "flux.hpp"
 #include "mmdit.hpp"
-#include "unet.hpp"
 
 struct DiffusionParams {
     struct ggml_tensor* x                     = nullptr;
