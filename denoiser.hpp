@@ -793,11 +793,28 @@ struct Flux2FlowDenoiser : public FluxFlowDenoiser {
         return mu;
     }
 
-    std::vector<float> get_sigmas(uint32_t n, int image_seq_len, scheduler_t scheduler_type, SDVersion version) override {
+    std::vector<float> get_sigmas(uint32_t n, int image_seq_len, scheduler_t /*scheduler_type*/, SDVersion /*version*/) override {
         float mu = compute_empirical_mu(n, image_seq_len);
         LOG_DEBUG("Flux2FlowDenoiser: set shift to %.3f", mu);
         set_shift(mu);
-        return Denoiser::get_sigmas(n, image_seq_len, scheduler_type, version);
+
+        std::vector<float> sigmas;
+        if (n == 0) {
+            sigmas.push_back(0.0f);
+            return sigmas;
+        }
+
+        sigmas.reserve(n + 1);
+        for (uint32_t i = 0; i <= n; ++i) {
+            float t = 1.0f - static_cast<float>(i) / static_cast<float>(n);
+            if (t <= 0.0f) {
+                sigmas.push_back(0.0f);
+            } else {
+                sigmas.push_back(flux_time_shift(mu, 1.0f, t));
+            }
+        }
+
+        return sigmas;
     }
 };
 

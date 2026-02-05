@@ -108,7 +108,6 @@ const char* unused_tensors[] = {
     // "v_pred", // Used to detect SDXL vpred models
     "text_encoders.llm.output.weight",
     "text_encoders.llm.lm_head.",
-    "first_stage_model.bn.",
 };
 
 bool is_unused_tensor(std::string name) {

@@ -128,9 +128,20 @@ public:
 
     std::shared_ptr<Denoiser> denoiser = std::make_shared<CompVisDenoiser>();
 
+    ggml_context* aux_ctx                 = nullptr;
+    ggml_tensor* flux2_bn_running_mean    = nullptr;
+    ggml_tensor* flux2_bn_running_var     = nullptr;
+    bool flux2_bn_stats_loaded            = false;
+    std::vector<float> flux2_bn_mean_vec;
+    std::vector<float> flux2_bn_std_vec;
+
     StableDiffusionGGML() = default;
 
     ~StableDiffusionGGML() {
+        if (aux_ctx != nullptr) {
+            ggml_free(aux_ctx);
+            aux_ctx = nullptr;
+        }
         if (clip_backend != backend) {
             ggml_backend_free(clip_backend);
         }
@@ -434,6 +445,59 @@ public:
         ignore_tensors.insert("model.diffusion_model.__32x32__");
         ignore_tensors.insert("model.diffusion_model.__index_timestep_zero__");
 
+        if (sd_version_is_flux2(version)) {
+            auto find_tensor_storage = [&](const std::string& name, const std::string& suffix) -> const TensorStorage* {
+                auto it = tensor_storage_map.find(name);
+                if (it != tensor_storage_map.end()) {
+                    return &it->second;
+                }
+                if (!suffix.empty()) {
+                    for (const auto& [key, tensor_storage] : tensor_storage_map) {
+                        if (ends_with(key, suffix)) {
+                            return &tensor_storage;
+                        }
+                    }
+                }
+                return nullptr;
+            };
+
+            const TensorStorage* mean_ts = find_tensor_storage("first_stage_model.bn.running_mean", ".bn.running_mean");
+            const TensorStorage* var_ts  = find_tensor_storage("first_stage_model.bn.running_var", ".bn.running_var");
+
+            if (mean_ts != nullptr && var_ts != nullptr) {
+                struct ggml_init_params aux_params;
+                aux_params.mem_size   = 1024 * 1024;
+                aux_params.mem_buffer = nullptr;
+                aux_params.no_alloc   = false;
+                aux_ctx               = ggml_init(aux_params);
+                if (aux_ctx != nullptr) {
+                    auto create_tensor_from_storage = [&](const TensorStorage& ts) -> ggml_tensor* {
+                        switch (ts.n_dims) {
+                            case 1:
+                                return ggml_new_tensor_1d(aux_ctx, ts.type, ts.ne[0]);
+                            case 2:
+                                return ggml_new_tensor_2d(aux_ctx, ts.type, ts.ne[0], ts.ne[1]);
+                            case 3:
+                                return ggml_new_tensor_3d(aux_ctx, ts.type, ts.ne[0], ts.ne[1], ts.ne[2]);
+                            case 4:
+                            default:
+                                return ggml_new_tensor_4d(aux_ctx, ts.type, ts.ne[0], ts.ne[1], ts.ne[2], ts.ne[3]);
+                        }
+                    };
+
+                    flux2_bn_running_mean = create_tensor_from_storage(*mean_ts);
+                    flux2_bn_running_var  = create_tensor_from_storage(*var_ts);
+
+                    tensors[mean_ts->name] = flux2_bn_running_mean;
+                    tensors[var_ts->name]  = flux2_bn_running_var;
+                } else {
+                    LOG_WARN("Failed to init aux context for Flux2 BN stats");
+                }
+            } else {
+                LOG_WARN("Flux2 BN stats not found in model weights; falling back to hardcoded stats");
+            }
+        }
+
         if (vae_decode_only) {
             ignore_tensors.insert("first_stage_model.encoder");
             ignore_tensors.insert("first_stage_model.conv1");
@@ -618,6 +682,14 @@ public:
 
         float img_cfg_scale = std::isfinite(guidance.img_cfg) ? guidance.img_cfg : guidance.txt_cfg;
         float slg_scale     = guidance.slg.scale;
+
+        if (sd_version_is_flux2(version)) {
+            if (cfg_scale != 1.0f || img_cfg_scale != 1.0f) {
+                LOG_INFO("Flux2 uses embedded guidance only; forcing cfg scales to 1.0");
+            }
+            cfg_scale     = 1.0f;
+            img_cfg_scale = 1.0f;
+        }
 
         if (img_cfg_scale != cfg_scale && !sd_version_is_inpaint_or_unet_edit(version)) {
             LOG_WARN("2-conditioning CFG is not supported with this model, disabling it for better performance...");
@@ -1118,6 +1190,44 @@ public:
     }
 
     void get_latents_mean_std_vec(ggml_tensor* latent, int channel_dim, std::vector<float>& latents_mean_vec, std::vector<float>& latents_std_vec) {
+        if (sd_version_is_flux2(version) && flux2_bn_running_mean != nullptr && flux2_bn_running_var != nullptr) {
+            if (!flux2_bn_stats_loaded) {
+                auto tensor_get_f32_1d = [](ggml_tensor* tensor, int64_t idx) -> float {
+                    if (tensor->type == GGML_TYPE_F32) {
+                        return ggml_ext_tensor_get_f32(tensor, idx);
+                    }
+                    if (tensor->type == GGML_TYPE_F16) {
+                        return ggml_fp16_to_fp32(ggml_ext_tensor_get_f16(tensor, idx));
+                    }
+                    LOG_WARN("Unsupported BN tensor type %s, defaulting to 0", ggml_type_name(tensor->type));
+                    return 0.0f;
+                };
+
+                int64_t n = ggml_nelements(flux2_bn_running_mean);
+                if (n == ggml_nelements(flux2_bn_running_var)) {
+                    flux2_bn_mean_vec.resize(static_cast<size_t>(n));
+                    flux2_bn_std_vec.resize(static_cast<size_t>(n));
+                    constexpr float bn_eps = 1e-4f;
+                    for (int64_t i = 0; i < n; ++i) {
+                        float mean_val = tensor_get_f32_1d(flux2_bn_running_mean, i);
+                        float var_val  = tensor_get_f32_1d(flux2_bn_running_var, i);
+                        flux2_bn_mean_vec[static_cast<size_t>(i)] = mean_val;
+                        flux2_bn_std_vec[static_cast<size_t>(i)]  = std::sqrt(var_val + bn_eps);
+                    }
+                    flux2_bn_stats_loaded = true;
+                } else {
+                    LOG_WARN("Flux2 BN stats size mismatch, falling back to hardcoded stats");
+                }
+            }
+
+            if (!flux2_bn_mean_vec.empty() &&
+                flux2_bn_mean_vec.size() == static_cast<size_t>(latent->ne[channel_dim])) {
+                latents_mean_vec = flux2_bn_mean_vec;
+                latents_std_vec  = flux2_bn_std_vec;
+                return;
+            }
+        }
+
         GGML_ASSERT(latent->ne[channel_dim] == 16 || latent->ne[channel_dim] == 48 || latent->ne[channel_dim] == 128);
         if (latent->ne[channel_dim] == 16) {
             latents_mean_vec = {-0.7571f, -0.7089f, -0.9113f, 0.1075f, -0.1745f, 0.9653f, -0.1517f, 1.5508f,
@@ -2152,6 +2262,12 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
     LOG_INFO("sampling using %s method", sampling_methods_str[sample_method]);
 
     int sample_steps = sd_img_gen_params->sample_params.sample_steps;
+    if (sd_version_is_flux2(sd_ctx->sd->version) &&
+        sd_img_gen_params->sample_params.custom_sigmas_count == 0 &&
+        sample_steps == 20) {
+        LOG_INFO("Flux2 distilled default steps detected; using 4 steps");
+        sample_steps = 4;
+    }
     std::vector<float> sigmas;
     if (sd_img_gen_params->sample_params.custom_sigmas_count > 0) {
         sigmas = std::vector<float>(sd_img_gen_params->sample_params.custom_sigmas,
@@ -2281,6 +2397,15 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
     }
 
     sd_guidance_params_t guidance = sd_img_gen_params->sample_params.guidance;
+    if (sd_version_is_flux2(sd_ctx->sd->version)) {
+        if (guidance.txt_cfg != 1.0f || guidance.img_cfg != 1.0f) {
+            guidance.txt_cfg = 1.0f;
+            guidance.img_cfg = 1.0f;
+        }
+        if (guidance.distilled_guidance == 3.5f) {
+            guidance.distilled_guidance = 1.0f;
+        }
+    }
     std::vector<sd_image_t*> ref_images;
     for (int i = 0; i < sd_img_gen_params->ref_images_count; i++) {
         ref_images.push_back(&sd_img_gen_params->ref_images[i]);
