@@ -1086,24 +1086,6 @@ struct SDGenerationParams {
              "--mask",
              "path to the mask image",
              &mask_image_path},
-            {"",
-             "--control-image",
-             "path to control image, control net",
-             &control_image_path},
-            {"",
-             "--control-video",
-             "path to control video frames, It must be a directory path. The video frames inside should be stored as images in "
-             "lexicographical (character) order. For example, if the control video path is `frames`, the directory contain images "
-             "such as 00.png, 01.png, ... etc.",
-             &control_video_path},
-            {"",
-             "--pm-id-images-dir",
-             "path to PHOTOMAKER input id images dir",
-             &pm_id_images_dir},
-            {"",
-             "--pm-id-embed-path",
-             "path to PHOTOMAKER v2 id embed",
-             &pm_id_embed_path},
         };
 
         options.int_options = {
@@ -1216,10 +1198,6 @@ struct SDGenerationParams {
              "--strength",
              "strength for noising/unnoising (default: 0.75)",
              &strength},
-            {"",
-             "--pm-style-strength",
-             "",
-             &pm_style_strength},
             {"",
              "--control-strength",
              "strength to apply Control Net (default: 0.9). 1.0 corresponds to full destruction of information in init image",
@@ -1568,16 +1546,12 @@ struct SDGenerationParams {
         load_if_exists("seed", seed);
 
         load_if_exists("strength", strength);
-        load_if_exists("control_strength", control_strength);
-        load_if_exists("pm_style_strength", pm_style_strength);
         load_if_exists("moe_boundary", moe_boundary);
-        load_if_exists("vace_strength", vace_strength);
 
         load_if_exists("auto_resize_ref_image", auto_resize_ref_image);
         load_if_exists("increase_ref_index", increase_ref_index);
 
         load_if_exists("skip_layers", skip_layers);
-        load_if_exists("high_noise_skip_layers", high_noise_skip_layers);
 
         load_if_exists("steps", sample_params.sample_steps);
         load_if_exists("high_noise_steps", high_noise_sample_params.sample_steps);

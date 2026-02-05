@@ -594,37 +594,6 @@ int main(int argc, const char* argv[]) {
         memset(mask_image.data, 255, gen_params.get_resolved_width() * gen_params.get_resolved_height());
     }
 
-    if (gen_params.control_image_path.size() > 0) {
-        if (!load_sd_image_from_file(&control_image,
-                                     gen_params.control_image_path.c_str(),
-                                     gen_params.get_resolved_width(),
-                                     gen_params.get_resolved_height())) {
-            LOG_ERROR("load image from '%s' failed", gen_params.control_image_path.c_str());
-            release_all_resources();
-            return 1;
-        }
-        if (cli_params.canny_preprocess) {  // apply preprocessor
-            preprocess_canny(control_image,
-                             0.08f,
-                             0.08f,
-                             0.8f,
-                             1.0f,
-                             false);
-        }
-    }
-
-    if (!gen_params.pm_id_images_dir.empty()) {
-        if (!load_images_from_dir(gen_params.pm_id_images_dir,
-                                  pmid_images,
-                                  0,
-                                  0,
-                                  0,
-                                  cli_params.verbose)) {
-            release_all_resources();
-            return 1;
-        }
-    }
-
     if (cli_params.mode == VID_GEN) {
         vae_decode_only = false;
     }
