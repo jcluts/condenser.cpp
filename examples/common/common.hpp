@@ -1379,9 +1379,9 @@ struct SDGenerationParams {
                 return -1;
             }
             cache_mode = argv_to_utf8(index, argv);
-            if (cache_mode != "easycache" && cache_mode != "ucache" &&
+            if (cache_mode != "easycache" &&
                 cache_mode != "dbcache" && cache_mode != "taylorseer" && cache_mode != "cache-dit") {
-                fprintf(stderr, "error: invalid cache mode '%s', must be 'easycache', 'ucache', 'dbcache', 'taylorseer', or 'cache-dit'\n", cache_mode.c_str());
+                fprintf(stderr, "error: invalid cache mode '%s', must be 'easycache', 'dbcache', 'taylorseer', or 'cache-dit'\n", cache_mode.c_str());
                 return -1;
             }
             return 1;
@@ -1471,7 +1471,7 @@ struct SDGenerationParams {
              on_ref_image_arg},
             {"",
              "--cache-mode",
-             "caching method: 'easycache' (DiT), 'ucache' (UNET), 'dbcache'/'taylorseer'/'cache-dit' (DiT block-level)",
+             "caching method: 'easycache' (DiT), 'dbcache'/'taylorseer'/'cache-dit' (DiT block-level)",
              on_cache_mode_arg},
             {"",
              "--cache-option",
@@ -1712,7 +1712,7 @@ struct SDGenerationParams {
                 std::string val = token.substr(eq_pos + 1);
                 try {
                     if (key == "threshold") {
-                        if (cache_mode == "easycache" || cache_mode == "ucache") {
+                        if (cache_mode == "easycache") {
                             cache_params.reuse_threshold = std::stof(val);
                         } else {
                             cache_params.residual_diff_threshold = std::stof(val);
@@ -1749,14 +1749,6 @@ struct SDGenerationParams {
             if (cache_mode == "easycache") {
                 cache_params.mode                   = SD_CACHE_EASYCACHE;
                 cache_params.reuse_threshold        = 0.2f;
-                cache_params.start_percent          = 0.15f;
-                cache_params.end_percent            = 0.95f;
-                cache_params.error_decay_rate       = 1.0f;
-                cache_params.use_relative_threshold = true;
-                cache_params.reset_error_on_compute = true;
-            } else if (cache_mode == "ucache") {
-                cache_params.mode                   = SD_CACHE_UCACHE;
-                cache_params.reuse_threshold        = 1.0f;
                 cache_params.start_percent          = 0.15f;
                 cache_params.end_percent            = 0.95f;
                 cache_params.error_decay_rate       = 1.0f;

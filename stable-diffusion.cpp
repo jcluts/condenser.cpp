@@ -13,7 +13,6 @@
 #include "diffusion_model.hpp"
 #include "easycache.hpp"
 #include "esrgan.hpp"
-#include "ucache.hpp"
 #include "vae.hpp"
 
 #include "latent-preview.h"
@@ -126,7 +125,6 @@ public:
     bool is_using_edm_v_parameterization = false;
 
     std::map<std::string, struct ggml_tensor*> tensors;
-
 
     std::shared_ptr<Denoiser> denoiser = std::make_shared<CompVisDenoiser>();
 
@@ -338,7 +336,6 @@ public:
         LOG_INFO("VAE weight type stat:             %s", wtype_stat_to_str(vae_wtype_stat).c_str());
 
         LOG_DEBUG("ggml tensor size = %d bytes", (int)sizeof(ggml_tensor));
-
 
         //flux 2 scale factors
         scale_factor = 1.0f;
@@ -628,15 +625,14 @@ public:
         }
 
         EasyCacheState easycache_state;
-        UCacheState ucache_state;
         CacheDitConditionState cachedit_state;
         bool easycache_enabled = false;
-        bool ucache_enabled    = false;
         bool cachedit_enabled  = false;
 
         if (cache_params != nullptr && cache_params->mode != SD_CACHE_DISABLED) {
             bool percent_valid = true;
-            if (cache_params->mode == SD_CACHE_EASYCACHE || cache_params->mode == SD_CACHE_UCACHE) {
+
+            if (cache_params->mode == SD_CACHE_EASYCACHE) {
                 percent_valid = cache_params->start_percent >= 0.0f &&
                                 cache_params->start_percent < 1.0f &&
                                 cache_params->end_percent > 0.0f &&
@@ -667,33 +663,6 @@ public:
                                  easycache_config.end_percent);
                     } else {
                         LOG_WARN("EasyCache requested but could not be initialized for this run");
-                    }
-                }
-            } else if (cache_params->mode == SD_CACHE_UCACHE) {
-                bool ucache_supported = sd_version_is_unet(version);
-                if (!ucache_supported) {
-                    LOG_WARN("UCache requested but not supported for this model type (only UNET models)");
-                } else {
-                    UCacheConfig ucache_config;
-                    ucache_config.enabled                = true;
-                    ucache_config.reuse_threshold        = std::max(0.0f, cache_params->reuse_threshold);
-                    ucache_config.start_percent          = cache_params->start_percent;
-                    ucache_config.end_percent            = cache_params->end_percent;
-                    ucache_config.error_decay_rate       = std::max(0.0f, std::min(1.0f, cache_params->error_decay_rate));
-                    ucache_config.use_relative_threshold = cache_params->use_relative_threshold;
-                    ucache_config.reset_error_on_compute = cache_params->reset_error_on_compute;
-                    ucache_state.init(ucache_config, denoiser.get());
-                    if (ucache_state.enabled()) {
-                        ucache_enabled = true;
-                        LOG_INFO("UCache enabled - threshold: %.3f, start: %.2f, end: %.2f, decay: %.2f, relative: %s, reset: %s",
-                                 ucache_config.reuse_threshold,
-                                 ucache_config.start_percent,
-                                 ucache_config.end_percent,
-                                 ucache_config.error_decay_rate,
-                                 ucache_config.use_relative_threshold ? "true" : "false",
-                                 ucache_config.reset_error_on_compute ? "true" : "false");
-                    } else {
-                        LOG_WARN("UCache requested but could not be initialized for this run");
                     }
                 }
             } else if (cache_params->mode == SD_CACHE_DBCACHE ||
@@ -737,10 +706,6 @@ public:
                     }
                 }
             }
-        }
-
-        if (ucache_enabled) {
-            ucache_state.set_sigmas(sigmas);
         }
 
         if (cachedit_enabled) {
@@ -847,36 +812,7 @@ public:
                 return easycache_step_active && easycache_state.is_step_skipped();
             };
 
-            const bool ucache_step_active = ucache_enabled && step > 0;
-            int ucache_step_index         = ucache_step_active ? (step - 1) : -1;
-            if (ucache_step_active) {
-                ucache_state.begin_step(ucache_step_index, sigma);
-            }
-
-            auto ucache_before_condition = [&](const SDCondition* condition, struct ggml_tensor* output_tensor) -> bool {
-                if (!ucache_step_active || condition == nullptr || output_tensor == nullptr) {
-                    return false;
-                }
-                return ucache_state.before_condition(condition,
-                                                     diffusion_params.x,
-                                                     output_tensor,
-                                                     sigma,
-                                                     ucache_step_index);
-            };
-
-            auto ucache_after_condition = [&](const SDCondition* condition, struct ggml_tensor* output_tensor) {
-                if (!ucache_step_active || condition == nullptr || output_tensor == nullptr) {
-                    return;
-                }
-                ucache_state.after_condition(condition,
-                                             diffusion_params.x,
-                                             output_tensor);
-            };
-
-            auto ucache_step_is_skipped = [&]() {
-                return ucache_step_active && ucache_state.is_step_skipped();
-            };
-
+     
             const bool cachedit_step_active = cachedit_enabled && step > 0;
             int cachedit_step_index         = cachedit_step_active ? (step - 1) : -1;
             if (cachedit_step_active) {
@@ -910,8 +846,6 @@ public:
             auto cache_before_condition = [&](const SDCondition* condition, struct ggml_tensor* output_tensor) -> bool {
                 if (easycache_step_active) {
                     return easycache_before_condition(condition, output_tensor);
-                } else if (ucache_step_active) {
-                    return ucache_before_condition(condition, output_tensor);
                 } else if (cachedit_step_active) {
                     return cachedit_before_condition(condition, output_tensor);
                 }
@@ -921,15 +855,13 @@ public:
             auto cache_after_condition = [&](const SDCondition* condition, struct ggml_tensor* output_tensor) {
                 if (easycache_step_active) {
                     easycache_after_condition(condition, output_tensor);
-                } else if (ucache_step_active) {
-                    ucache_after_condition(condition, output_tensor);
                 } else if (cachedit_step_active) {
                     cachedit_after_condition(condition, output_tensor);
                 }
             };
 
             auto cache_step_is_skipped = [&]() {
-                return easycache_step_is_skipped() || ucache_step_is_skipped() || cachedit_step_is_skipped();
+                return easycache_step_is_skipped() || cachedit_step_is_skipped();
             };
 
             std::vector<float> scaling = denoiser->get_scalings(sigma);
@@ -1110,26 +1042,6 @@ public:
                 }
             } else if (total_steps > 0) {
                 LOG_INFO("EasyCache completed without skipping steps");
-            }
-        }
-
-        if (ucache_enabled) {
-            size_t total_steps = sigmas.size() > 0 ? sigmas.size() - 1 : 0;
-            if (ucache_state.total_steps_skipped > 0 && total_steps > 0) {
-                if (ucache_state.total_steps_skipped < static_cast<int>(total_steps)) {
-                    double speedup = static_cast<double>(total_steps) /
-                                     static_cast<double>(total_steps - ucache_state.total_steps_skipped);
-                    LOG_INFO("UCache skipped %d/%zu steps (%.2fx estimated speedup)",
-                             ucache_state.total_steps_skipped,
-                             total_steps,
-                             speedup);
-                } else {
-                    LOG_INFO("UCache skipped %d/%zu steps",
-                             ucache_state.total_steps_skipped,
-                             total_steps);
-                }
-            } else if (total_steps > 0) {
-                LOG_INFO("UCache completed without skipping steps");
             }
         }
 
@@ -1880,8 +1792,6 @@ char* sd_img_gen_params_to_str(const sd_img_gen_params_t* sd_img_gen_params) {
     const char* cache_mode_str = "disabled";
     if (sd_img_gen_params->cache.mode == SD_CACHE_EASYCACHE) {
         cache_mode_str = "easycache";
-    } else if (sd_img_gen_params->cache.mode == SD_CACHE_UCACHE) {
-        cache_mode_str = "ucache";
     }
     snprintf(buf + strlen(buf), 4096 - strlen(buf),
              "cache: %s (threshold=%.3f, start=%.2f, end=%.2f)\n",
