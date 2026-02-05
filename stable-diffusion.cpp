@@ -247,13 +247,6 @@ public:
             }
         }
 
-        if (strlen(SAFE_STR(sd_ctx_params->high_noise_diffusion_model_path)) > 0) {
-            LOG_INFO("loading high noise diffusion model from '%s'", sd_ctx_params->high_noise_diffusion_model_path);
-            if (!model_loader.init_from_file(sd_ctx_params->high_noise_diffusion_model_path, "model.high_noise_diffusion_model.")) {
-                LOG_WARN("loading diffusion model from '%s' failed", sd_ctx_params->high_noise_diffusion_model_path);
-            }
-        }
-
         bool is_unet = false;
 
         if (strlen(SAFE_STR(sd_ctx_params->clip_l_path)) > 0) {
@@ -387,11 +380,6 @@ public:
             diffusion_model->alloc_params_buffer();
             diffusion_model->get_param_tensors(tensors);
 
-            if (high_noise_diffusion_model) {
-                high_noise_diffusion_model->alloc_params_buffer();
-                high_noise_diffusion_model->get_param_tensors(tensors);
-            }
-
             if (sd_ctx_params->keep_vae_on_cpu && !ggml_backend_is_cpu(backend)) {
                 LOG_INFO("VAE Autoencoder: Using CPU backend");
                 vae_backend = ggml_backend_cpu_init();
@@ -422,15 +410,9 @@ public:
             if (sd_ctx_params->flash_attn || sd_ctx_params->diffusion_flash_attn) {
                 LOG_INFO("Using flash attention in the diffusion model");
                 diffusion_model->set_flash_attention_enabled(true);
-                if (high_noise_diffusion_model) {
-                    high_noise_diffusion_model->set_flash_attention_enabled(true);
-                }
             }
 
             diffusion_model->set_circular_axes(sd_ctx_params->circular_x, sd_ctx_params->circular_y);
-            if (high_noise_diffusion_model) {
-                high_noise_diffusion_model->set_circular_axes(sd_ctx_params->circular_x, sd_ctx_params->circular_y);
-            }
             if (first_stage_model) {
                 first_stage_model->set_circular_axes(sd_ctx_params->circular_x, sd_ctx_params->circular_y);
             }
@@ -481,9 +463,7 @@ public:
         {
             size_t clip_params_mem_size = cond_stage_model->get_params_buffer_size();
             size_t unet_params_mem_size = diffusion_model->get_params_buffer_size();
-            if (high_noise_diffusion_model) {
-                unet_params_mem_size += high_noise_diffusion_model->get_params_buffer_size();
-            }
+
             size_t vae_params_mem_size = 0;
  
             size_t total_params_ram_size  = 0;
@@ -1913,21 +1893,6 @@ char* sd_img_gen_params_to_str(const sd_img_gen_params_t* sd_img_gen_params) {
     return buf;
 }
 
-void sd_vid_gen_params_init(sd_vid_gen_params_t* sd_vid_gen_params) {
-    *sd_vid_gen_params = {};
-    sd_sample_params_init(&sd_vid_gen_params->sample_params);
-    sd_sample_params_init(&sd_vid_gen_params->high_noise_sample_params);
-    sd_vid_gen_params->high_noise_sample_params.sample_steps = -1;
-    sd_vid_gen_params->width                                 = 512;
-    sd_vid_gen_params->height                                = 512;
-    sd_vid_gen_params->strength                              = 0.75f;
-    sd_vid_gen_params->seed                                  = -1;
-    sd_vid_gen_params->video_frames                          = 6;
-    sd_vid_gen_params->moe_boundary                          = 0.875f;
-    sd_vid_gen_params->vace_strength                         = 1.f;
-    sd_vid_gen_params->vae_tiling_params                     = {false, 0, 0, 0.5f, 0.0f, 0.0f};
-    sd_cache_params_init(&sd_vid_gen_params->cache);
-}
 
 struct sd_ctx_t {
     StableDiffusionGGML* sd = nullptr;

@@ -1257,21 +1257,7 @@ namespace LLM {
                     seqlens.push_back(win_h * win_w * params.vision.spatial_merge_size * params.vision.spatial_merge_size);
                 }
             }
-            // printf("window_index: ");
-            // for (int i : window_index_vec) {
-            //     printf("%d ", i);
-            // }
-            // printf("\n");
-            // printf("window_inverse_index: ");
-            // for (int i : window_inverse_index_vec) {
-            //     printf("%d ", i);
-            // }
-            // printf("\n");
-            // printf("seqlens: ");
-            // for (int i : seqlens) {
-            //     printf("%d ", i);
-            // }
-            // printf("\n");
+
             auto window_index         = ggml_new_tensor_1d(compute_ctx,
                                                            GGML_TYPE_I32,
                                                            llm_grid_h * llm_grid_w);

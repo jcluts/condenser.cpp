@@ -372,8 +372,6 @@ SD_API void sd_img_gen_params_init(sd_img_gen_params_t* sd_img_gen_params);
 SD_API char* sd_img_gen_params_to_str(const sd_img_gen_params_t* sd_img_gen_params);
 SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_gen_params);
 
-SD_API void sd_vid_gen_params_init(sd_vid_gen_params_t* sd_vid_gen_params);
-
 typedef struct upscaler_ctx_t upscaler_ctx_t;
 
 SD_API upscaler_ctx_t* new_upscaler_ctx(const char* esrgan_path,
@@ -396,12 +394,6 @@ SD_API bool convert(const char* input_path,
                     const char* tensor_type_rules,
                     bool convert_name);
 
-SD_API bool preprocess_canny(sd_image_t image,
-                             float high_threshold,
-                             float low_threshold,
-                             float weak,
-                             float strong,
-                             bool inverse);
 
 SD_API const char* sd_commit(void);
 SD_API const char* sd_version(void);
