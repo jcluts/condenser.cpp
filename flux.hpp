@@ -1061,11 +1061,9 @@ namespace Flux {
                                             circular_x_enabled,
                                             flux_params.axes_dim);
             int pos_len = static_cast<int>(pe_vec.size() / flux_params.axes_dim_sum / 2);
-            // LOG_DEBUG("pos_len %d", pos_len);
+
             auto pe = ggml_new_tensor_4d(compute_ctx, GGML_TYPE_F32, 2, 2, flux_params.axes_dim_sum / 2, pos_len);
-            // pe->data = pe_vec.data();
-            // print_ggml_tensor(pe);
-            // pe->data = nullptr;
+
             set_backend_tensor_data(pe, pe_vec.data());
 
             auto runner_ctx = get_context();
