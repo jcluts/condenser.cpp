@@ -2402,9 +2402,6 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
         }
     } else {
         LOG_INFO("TXT2IMG");
-        if (sd_version_is_inpaint(sd_ctx->sd->version)) {
-            LOG_WARN("This is an inpainting model, this should only be used in img2img mode with a mask");
-        }
         init_latent = sd_ctx->sd->generate_init_latent(work_ctx, width, height);
     }
 
