@@ -406,6 +406,10 @@ public:
             first_stage_model->alloc_params_buffer();
             first_stage_model->get_param_tensors(tensors, "first_stage_model");
 
+            if (sd_ctx_params->vae_conv_direct) {
+                LOG_INFO("Using Conv2d direct in the vae model");
+                first_stage_model->set_conv2d_direct_enabled(true);
+            }
 
             if (sd_ctx_params->flash_attn) {
                 LOG_INFO("Using flash attention");
@@ -571,26 +575,12 @@ public:
             prediction_t pred_type = sd_ctx_params->prediction;
             float flow_shift       = sd_ctx_params->flow_shift;
 
-            if (pred_type == PREDICTION_COUNT) {
-                if (sd_version_is_flux2(version)) {
-                    pred_type = FLUX2_FLOW_PRED;
-                } else {
-                    pred_type = EPS_PRED;
-                }
-            }
+            pred_type = FLUX2_FLOW_PRED;
 
-            switch (pred_type) {
-                case FLUX2_FLOW_PRED: {
-                    LOG_INFO("running in Flux2 FLOW mode");
-                    denoiser = std::make_shared<Flux2FlowDenoiser>();
-                    break;
-                }
-                default: {
-                    LOG_ERROR("Unknown predition type %i", pred_type);
-                    ggml_free(ctx);
-                    return false;
-                }
-            }
+
+            LOG_INFO("running in Flux2 FLOW mode");
+            denoiser = std::make_shared<Flux2FlowDenoiser>();
+
 
             auto comp_vis_denoiser = std::dynamic_pointer_cast<CompVisDenoiser>(denoiser);
             if (comp_vis_denoiser) {
@@ -1288,7 +1278,8 @@ public:
 
     void process_latent_in(ggml_tensor* latent) {
 
-        int channel_dim = sd_version_is_flux2(version) ? 2 : 3;
+        //flux 2 uses channel dim 2
+        int channel_dim = 2;
         std::vector<float> latents_mean_vec;
         std::vector<float> latents_std_vec;
         get_latents_mean_std_vec(latent, channel_dim, latents_mean_vec, latents_std_vec);
@@ -1318,7 +1309,8 @@ public:
     }
 
     void process_latent_out(ggml_tensor* latent) {
-        int channel_dim = sd_version_is_flux2(version) ? 2 : 3;
+        //flux 2 uses channel dim 2
+        int channel_dim = 2;
         std::vector<float> latents_mean_vec;
         std::vector<float> latents_std_vec;
         get_latents_mean_std_vec(latent, channel_dim, latents_mean_vec, latents_std_vec);
@@ -1485,6 +1477,31 @@ public:
         LOG_DEBUG("computing vae decode graph...");
         process_latent_out(x);
         // x = load_tensor_from_file(work_ctx, "wan_vae_z.bin");
+
+        // Dump latent for standalone VAE bypass tool
+        {
+            const char* dump_path = getenv("CONDENSER_DUMP_LATENT");
+            if (dump_path) {
+                FILE* f = fopen(dump_path, "wb");
+                if (f) {
+                    // Header: magic, ndims, ne[0..3], type
+                    uint32_t magic = 0x4C415432;  // "LAT2"
+                    uint32_t ndims = 4;
+                    fwrite(&magic, 4, 1, f);
+                    fwrite(&ndims, 4, 1, f);
+                    for (int d = 0; d < 4; d++) {
+                        int64_t ne = x->ne[d];
+                        fwrite(&ne, 8, 1, f);
+                    }
+                    // Write raw f32 data in ggml layout (ne[0] varies fastest)
+                    int64_t total = ggml_nelements(x);
+                    fwrite(x->data, sizeof(float), total, f);
+                    fclose(f);
+                    LOG_INFO("Dumped latent to %s: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "] (%d floats)",
+                             dump_path, x->ne[0], x->ne[1], x->ne[2], x->ne[3], (int)total);
+                }
+            }
+        }
         if (vae_tiling_params.enabled) {
             LOG_DEBUG("VAE decode with tiling");
             float tile_overlap;
