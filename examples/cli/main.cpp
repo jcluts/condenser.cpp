@@ -419,7 +419,7 @@ int main(int argc, const char* argv[]) {
 
     parse_args(argc, argv, cli_params, ctx_params, gen_params);
 
-    cli_params.preview_fps = gen_params.fps;
+    cli_params.preview_fps = 16;
     if (cli_params.preview_method == PREVIEW_PROJ)
         cli_params.preview_fps /= 4;
 

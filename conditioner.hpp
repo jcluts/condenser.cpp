@@ -17,7 +17,7 @@ struct ConditionerParams {
     std::string text;
     int width                           = -1;
     int height                          = -1;
-    int adm_in_channels                 = -1;
+
     bool zero_out_masked                = false;
     std::vector<sd_image_t*> ref_images = {};
 };

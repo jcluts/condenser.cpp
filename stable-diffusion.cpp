@@ -55,7 +55,7 @@ void suppress_pp(int step, int steps, float time, void* data) {
 class StableDiffusionGGML {
 public:
     ggml_backend_t backend             = nullptr;  // general backend
-    ggml_backend_t clip_backend        = nullptr;
+    ggml_backend_t llm_backend         = nullptr;
     ggml_backend_t vae_backend         = nullptr;
 
     SDVersion version;
@@ -93,8 +93,8 @@ public:
             ggml_free(aux_ctx);
             aux_ctx = nullptr;
         }
-        if (clip_backend != backend) {
-            ggml_backend_free(clip_backend);
+        if (llm_backend != backend) {
+            ggml_backend_free(llm_backend);
         }
         if (vae_backend != backend) {
             ggml_backend_free(vae_backend);
@@ -278,16 +278,16 @@ public:
             LOG_INFO("Using circular padding for convolutions");
         }
 
-        bool clip_on_cpu = sd_ctx_params->keep_clip_on_cpu;
+        bool llm_on_cpu = sd_ctx_params->keep_llm_on_cpu;
 
         {
-            clip_backend = backend;
-            if (clip_on_cpu && !ggml_backend_is_cpu(backend)) {
-                LOG_INFO("CLIP: Using CPU backend");
-                clip_backend = ggml_backend_cpu_init();
+            llm_backend = backend;
+            if (llm_on_cpu && !ggml_backend_is_cpu(backend)) {
+                LOG_INFO("LLM: Using CPU backend");
+                llm_backend = ggml_backend_cpu_init();
             }
 
-            cond_stage_model = std::make_shared<LLMEmbedder>(clip_backend,
+            cond_stage_model = std::make_shared<LLMEmbedder>(llm_backend,
                                                              offload_params_to_cpu,
                                                              tensor_storage_map,
                                                              version);
@@ -435,7 +435,7 @@ public:
 
             size_t total_params_ram_size  = 0;
             size_t total_params_vram_size = 0;
-            if (ggml_backend_is_cpu(clip_backend)) {
+            if (ggml_backend_is_cpu(llm_backend)) {
                 total_params_ram_size += clip_params_mem_size;
             } else {
                 total_params_vram_size += clip_params_mem_size;
@@ -461,7 +461,7 @@ public:
                 total_params_vram_size / 1024.0 / 1024.0,
                 total_params_ram_size / 1024.0 / 1024.0,
                 clip_params_mem_size / 1024.0 / 1024.0,
-                ggml_backend_is_cpu(clip_backend) ? "RAM" : "VRAM",
+                ggml_backend_is_cpu(llm_backend) ? "RAM" : "VRAM",
                 diffusion_params_mem_size / 1024.0 / 1024.0,
                 ggml_backend_is_cpu(backend) ? "RAM" : "VRAM",
                 vae_params_mem_size / 1024.0 / 1024.0,
@@ -607,21 +607,11 @@ public:
         if (sd_preview_mode != PREVIEW_NONE && sd_preview_mode != PREVIEW_PROJ) {
             int64_t W = x->ne[0] * get_vae_scale_factor();
             int64_t H = x->ne[1] * get_vae_scale_factor();
-            if (ggml_n_dims(x) == 4) {
-                // assuming video mode (if batch processing gets implemented this will break)
-                int64_t T = x->ne[2];
-                preview_tensor = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32,
-                                                    W,
-                                                    H,
-                                                    T,
-                                                    3);
-            } else {
-                preview_tensor = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32,
-                                                    W,
-                                                    H,
-                                                    3,
-                                                    x->ne[3]);
-            }
+            preview_tensor = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32,
+                                                W,
+                                                H,
+                                                3,
+                                                x->ne[3]);
         }
 
         auto denoise = [&](ggml_tensor* input, float sigma, int step) -> ggml_tensor* {
@@ -857,13 +847,10 @@ public:
 
     ggml_tensor* generate_init_latent(ggml_context* work_ctx,
                                       int width,
-                                      int height,
-                                      int frames = 1,
-                                      bool video = false) {
+                                      int height) {
         int vae_scale_factor = get_vae_scale_factor();
         int W                = width / vae_scale_factor;
         int H                = height / vae_scale_factor;
-        int T                = frames;
 
         int C = get_latent_channel();
         ggml_tensor* init_latent;
@@ -1168,17 +1155,6 @@ const char* sample_method_to_str[] = {
     "euler",
     "euler_a",
     "heun",
-    "dpm2",
-    "dpm++2s_a",
-    "dpm++2m",
-    "dpm++2mv2",
-    "ipndm",
-    "ipndm_v",
-    "lcm",
-    "ddim_trailing",
-    "tcd",
-    "res_multistep",
-    "res_2s",
 };
 
 const char* sd_sample_method_name(enum sample_method_t sample_method) {
@@ -1228,11 +1204,6 @@ enum scheduler_t str_to_scheduler(const char* str) {
 }
 
 const char* prediction_to_str[] = {
-    "eps",
-    "v",
-    "edm_v",
-    "sd3_flow",
-    "flux_flow",
     "flux2_flow",
 };
 
@@ -1308,7 +1279,7 @@ void sd_ctx_params_init(sd_ctx_params_t* sd_ctx_params) {
     sd_ctx_params->prediction              = PREDICTION_COUNT;
     sd_ctx_params->offload_params_to_cpu   = false;
     sd_ctx_params->enable_mmap             = false;
-    sd_ctx_params->keep_clip_on_cpu        = false;
+    sd_ctx_params->keep_llm_on_cpu        = false;
     sd_ctx_params->keep_vae_on_cpu         = false;
     sd_ctx_params->diffusion_flash_attn    = false;
     sd_ctx_params->circular_x              = false;
@@ -1337,7 +1308,7 @@ char* sd_ctx_params_to_str(const sd_ctx_params_t* sd_ctx_params) {
              "sampler_rng_type: %s\n"
              "prediction: %s\n"
              "offload_params_to_cpu: %s\n"
-             "keep_clip_on_cpu: %s\n"
+             "keep_llm_on_cpu: %s\n"
              "keep_vae_on_cpu: %s\n"
              "flash_attn: %s\n"
              "diffusion_flash_attn: %s\n"
@@ -1357,7 +1328,7 @@ char* sd_ctx_params_to_str(const sd_ctx_params_t* sd_ctx_params) {
              sd_rng_type_name(sd_ctx_params->sampler_rng_type),
              sd_prediction_name(sd_ctx_params->prediction),
              BOOL_STR(sd_ctx_params->offload_params_to_cpu),
-             BOOL_STR(sd_ctx_params->keep_clip_on_cpu),
+             BOOL_STR(sd_ctx_params->keep_llm_on_cpu),
              BOOL_STR(sd_ctx_params->keep_vae_on_cpu),
              BOOL_STR(sd_ctx_params->flash_attn),
              BOOL_STR(sd_ctx_params->diffusion_flash_attn),
@@ -1494,9 +1465,6 @@ enum sample_method_t sd_get_default_sample_method(const sd_ctx_t* sd_ctx) {
 }
 
 enum scheduler_t sd_get_default_scheduler(const sd_ctx_t* sd_ctx, enum sample_method_t sample_method) {
-    if (sample_method == LCM_SAMPLE_METHOD) {
-        return LCM_SCHEDULER;
-    }
     return DISCRETE_SCHEDULER;
 }
 
@@ -1533,7 +1501,7 @@ sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
     condition_params.width           = width;
     condition_params.height          = height;
     condition_params.ref_images      = ref_images;
-    condition_params.adm_in_channels = static_cast<int>(sd_ctx->sd->diffusion_model->get_adm_in_channels());
+
 
     // Get learned condition
     condition_params.zero_out_masked = false;

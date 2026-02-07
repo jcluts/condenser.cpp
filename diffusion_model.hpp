@@ -26,7 +26,7 @@ struct DiffusionModel {
     virtual void free_compute_buffer()                                                  = 0;
     virtual void get_param_tensors(std::map<std::string, struct ggml_tensor*>& tensors) = 0;
     virtual size_t get_params_buffer_size()                                             = 0;
-    virtual int64_t get_adm_in_channels()                            = 0;
+
     virtual void set_flash_attention_enabled(bool enabled)           = 0;
     virtual void set_circular_axes(bool circular_x, bool circular_y) = 0;
 };
@@ -67,9 +67,7 @@ struct FluxModel : public DiffusionModel {
         return flux.get_params_buffer_size();
     }
 
-    int64_t get_adm_in_channels() override {
-        return 768;
-    }
+
 
     void set_flash_attention_enabled(bool enabled) {
         flux.set_flash_attention_enabled(enabled);

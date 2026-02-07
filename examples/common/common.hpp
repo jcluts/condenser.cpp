@@ -439,7 +439,7 @@ struct SDContextParams {
     rng_type_t sampler_rng_type = RNG_TYPE_COUNT;
     bool offload_params_to_cpu  = false;
     bool enable_mmap            = false;
-    bool clip_on_cpu            = false;
+    bool llm_on_cpu             = false;
     bool vae_on_cpu             = false;
     bool flash_attn             = false;
     bool diffusion_flash_attn   = false;
@@ -518,9 +518,9 @@ struct SDContextParams {
              "whether to memory-map model",
              true, &enable_mmap},
             {"",
-             "--clip-on-cpu",
-             "keep clip in cpu (for low vram)",
-             true, &clip_on_cpu},
+             "--llm-on-cpu",
+             "keep LLM text encoder in cpu (for low vram)",
+             true, &llm_on_cpu},
             {"",
              "--vae-on-cpu",
              "keep vae in cpu (for low vram)",
@@ -663,7 +663,7 @@ struct SDContextParams {
              on_sampler_rng_arg},
             {"",
              "--prediction",
-             "prediction type override, one of [eps, v, edm_v, sd3_flow, flux_flow, flux2_flow]",
+             "prediction type override (default: flux2_flow)",
              on_prediction_arg},
             {"",
              "--vae-tile-size",
@@ -714,7 +714,7 @@ struct SDContextParams {
             << "  flow_shift: " << (std::isinf(flow_shift) ? "INF" : std::to_string(flow_shift)) << "\n"
             << "  offload_params_to_cpu: " << (offload_params_to_cpu ? "true" : "false") << ",\n"
             << "  enable_mmap: " << (enable_mmap ? "true" : "false") << ",\n"
-            << "  clip_on_cpu: " << (clip_on_cpu ? "true" : "false") << ",\n"
+            << "  llm_on_cpu: " << (llm_on_cpu ? "true" : "false") << ",\n"
             << "  vae_on_cpu: " << (vae_on_cpu ? "true" : "false") << ",\n"
             << "  flash_attn: " << (flash_attn ? "true" : "false") << ",\n"
             << "  diffusion_flash_attn: " << (diffusion_flash_attn ? "true" : "false") << ",\n"
@@ -750,7 +750,7 @@ struct SDContextParams {
         sd_ctx_params.prediction              = prediction;
         sd_ctx_params.offload_params_to_cpu   = offload_params_to_cpu;
         sd_ctx_params.enable_mmap             = enable_mmap;
-        sd_ctx_params.keep_clip_on_cpu        = clip_on_cpu;
+        sd_ctx_params.keep_llm_on_cpu        = llm_on_cpu;
         sd_ctx_params.keep_vae_on_cpu         = vae_on_cpu;
         sd_ctx_params.flash_attn              = flash_attn;
         sd_ctx_params.diffusion_flash_attn    = diffusion_flash_attn;
@@ -817,8 +817,6 @@ struct SDGenerationParams {
     std::string scm_mask;
     bool scm_policy_dynamic = true;
     sd_cache_params_t cache_params{};
-
-    int fps = 16;
 
     int64_t seed = 42;
 
@@ -1037,12 +1035,11 @@ struct SDGenerationParams {
              on_seed_arg},
             {"",
              "--sampling-method",
-             "sampling method, one of [euler, euler_a, heun, dpm2, dpm++2s_a, dpm++2m, dpm++2mv2, ipndm, ipndm_v, lcm, ddim_trailing, tcd, res_multistep, res_2s] "
-             "(default: euler for Flux/SD3/Wan, euler_a otherwise)",
+             "sampling method, one of [euler, euler_a, heun] (default: euler)",
              on_sample_method_arg},
             {"",
              "--scheduler",
-             "denoiser sigma scheduler, one of [discrete, karras, exponential, ays, gits, smoothstep, sgm_uniform, simple, kl_optimal, lcm, bong_tangent], default: discrete",
+             "denoiser sigma scheduler (ignored for Flux 2 Klein, which uses its own mu-shifted schedule)",
              on_scheduler_arg},
             {"",
              "--sigmas",

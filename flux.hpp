@@ -876,7 +876,7 @@ namespace Flux {
             // x: [N, in_channels, h, w]
             // timesteps: [N, ]
             // context: [N, max_position, hidden_size]
-            // y: [N, adm_in_channels] or [1, adm_in_channels]
+            // y: [N, pooled_dim]
             // guidance: [N, ]
             auto get_graph = [&]() -> struct ggml_cgraph* {
                 return build_graph(x, timesteps, context, c_concat, y, guidance, ref_latents, increase_ref_index, skip_layers);

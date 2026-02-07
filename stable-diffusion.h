@@ -39,17 +39,6 @@ enum sample_method_t {
     EULER_SAMPLE_METHOD,
     EULER_A_SAMPLE_METHOD,
     HEUN_SAMPLE_METHOD,
-    DPM2_SAMPLE_METHOD,
-    DPMPP2S_A_SAMPLE_METHOD,
-    DPMPP2M_SAMPLE_METHOD,
-    DPMPP2Mv2_SAMPLE_METHOD,
-    IPNDM_SAMPLE_METHOD,
-    IPNDM_V_SAMPLE_METHOD,
-    LCM_SAMPLE_METHOD,
-    DDIM_TRAILING_SAMPLE_METHOD,
-    TCD_SAMPLE_METHOD,
-    RES_MULTISTEP_SAMPLE_METHOD,
-    RES_2S_SAMPLE_METHOD,
     SAMPLE_METHOD_COUNT
 };
 
@@ -69,11 +58,6 @@ enum scheduler_t {
 };
 
 enum prediction_t {
-    EPS_PRED,
-    V_PRED,
-    EDM_V_PRED,
-    FLOW_PRED,
-    FLUX_FLOW_PRED,
     FLUX2_FLOW_PRED,
     PREDICTION_COUNT
 };
@@ -163,7 +147,7 @@ typedef struct {
     enum prediction_t prediction;
     bool offload_params_to_cpu;
     bool enable_mmap;
-    bool keep_clip_on_cpu;
+    bool keep_llm_on_cpu;
     bool keep_vae_on_cpu;
     bool flash_attn;
     bool diffusion_flash_attn;
