@@ -1562,7 +1562,6 @@ void sd_img_gen_params_init(sd_img_gen_params_t* sd_img_gen_params) {
     sd_img_gen_params->ref_images_count  = 0;
     sd_img_gen_params->width             = 512;
     sd_img_gen_params->height            = 512;
-    sd_img_gen_params->strength          = 0.75f;
     sd_img_gen_params->seed              = -1;
     sd_img_gen_params->batch_count       = 1;
     sd_img_gen_params->vae_tiling_params = {false, 0, 0, 0.5f, 0.0f, 0.0f};
@@ -1584,7 +1583,6 @@ char* sd_img_gen_params_to_str(const sd_img_gen_params_t* sd_img_gen_params) {
              "width: %d\n"
              "height: %d\n"
              "sample_params: %s\n"
-             "strength: %.2f\n"
              "seed: %" PRId64
              "\n"
              "batch_count: %d\n"
@@ -1598,7 +1596,6 @@ char* sd_img_gen_params_to_str(const sd_img_gen_params_t* sd_img_gen_params) {
              sd_img_gen_params->width,
              sd_img_gen_params->height,
              SAFE_STR(sample_params_str),
-             sd_img_gen_params->strength,
              sd_img_gen_params->seed,
              sd_img_gen_params->batch_count,
              sd_img_gen_params->ref_images_count,

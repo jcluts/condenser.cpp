@@ -561,7 +561,6 @@ int main(int argc, const char* argv[]) {
             img_gen_params.width                  = gen_params.get_resolved_width();
             img_gen_params.height                 = gen_params.get_resolved_height();
             img_gen_params.sample_params          = gen_params.sample_params;
-            img_gen_params.strength               = gen_params.strength;
             img_gen_params.seed                   = gen_params.seed;
             img_gen_params.batch_count            = gen_params.batch_count;
             img_gen_params.vae_tiling_params      = ctx_params.vae_tiling_params;

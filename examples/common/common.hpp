@@ -830,8 +830,6 @@ struct SDGenerationParams {
 
     int fps = 16;
 
-    float strength = 0.75f;
-
     int64_t seed = 42;
 
     int upscale_repeats   = 1;
@@ -890,10 +888,6 @@ struct SDGenerationParams {
              "--guidance",
              "distilled guidance scale for models with guidance input (default: 3.5)",
              &sample_params.guidance.distilled_guidance},
-            {"",
-             "--strength",
-             "strength for noising/unnoising (default: 0.75)",
-             &strength},
         };
 
         options.bool_options = {
@@ -1144,8 +1138,6 @@ struct SDGenerationParams {
         load_if_exists("upscale_repeats", upscale_repeats);
         load_if_exists("seed", seed);
 
-        load_if_exists("strength", strength);
-
         load_if_exists("auto_resize_ref_image", auto_resize_ref_image);
         load_if_exists("increase_ref_index", increase_ref_index);
 
@@ -1192,11 +1184,6 @@ struct SDGenerationParams {
     bool process_and_check(SDMode mode) {
         if (sample_params.sample_steps <= 0) {
             LOG_ERROR("error: the sample_steps must be greater than 0\n");
-            return false;
-        }
-
-        if (strength < 0.f || strength > 1.f) {
-            LOG_ERROR("error: can only work with strength in [0.0, 1.0]\n");
             return false;
         }
 
@@ -1360,7 +1347,6 @@ struct SDGenerationParams {
             << " (threshold=" << cache_params.reuse_threshold
             << ", start=" << cache_params.start_percent
             << ", end=" << cache_params.end_percent << "),\n"
-            << "  strength: " << strength << ",\n"
             << "  seed: " << seed << ",\n"
             << "  upscale_repeats: " << upscale_repeats << ",\n"
             << "  upscale_tile_size: " << upscale_tile_size << ",\n"

@@ -252,7 +252,6 @@ typedef struct {
     int width;
     int height;
     sd_sample_params_t sample_params;
-    float strength;
     int64_t seed;
     int batch_count;
     sd_tiling_params_t vae_tiling_params;
