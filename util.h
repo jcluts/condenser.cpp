@@ -17,8 +17,6 @@ bool contains(const std::string& str, const std::string& substr);
 
 std::string sd_format(const char* fmt, ...);
 
-void replace_all_chars(std::string& str, char target, char replacement);
-
 int round_up_to(int value, int base);
 
 bool file_exists(const std::string& filename);
@@ -36,13 +34,9 @@ typedef struct {
     float* data;
 } sd_image_f32_t;
 
-void normalize_sd_image_f32_t(sd_image_f32_t image, float means[3], float stds[3]);
-
 sd_image_f32_t sd_image_t_to_sd_image_f32_t(sd_image_t image);
 
 sd_image_f32_t resize_sd_image_f32_t(sd_image_f32_t image, int target_width, int target_height);
-
-sd_image_f32_t clip_preprocess(sd_image_f32_t image, int target_width, int target_height);
 
 class MmapWrapper {
 public:

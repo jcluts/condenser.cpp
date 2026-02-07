@@ -48,14 +48,6 @@ bool contains(const std::string& str, const std::string& substr) {
     return false;
 }
 
-void replace_all_chars(std::string& str, char target, char replacement) {
-    for (size_t i = 0; i < str.length(); ++i) {
-        if (str[i] == target) {
-            str[i] = replacement;
-        }
-    }
-}
-
 std::string sd_format(const char* fmt, ...) {
     va_list ap;
     va_list ap2;
@@ -536,100 +528,6 @@ sd_image_f32_t resize_sd_image_f32_t(sd_image_f32_t image, int target_width, int
     }
 
     return resized_image;
-}
-
-void normalize_sd_image_f32_t(sd_image_f32_t image, float means[3], float stds[3]) {
-    for (uint32_t y = 0; y < image.height; y++) {
-        for (uint32_t x = 0; x < image.width; x++) {
-            for (uint32_t k = 0; k < image.channel; k++) {
-                int index         = (y * image.width + x) * image.channel + k;
-                image.data[index] = (image.data[index] - means[k]) / stds[k];
-            }
-        }
-    }
-}
-
-// Constants for means and std
-float means[3] = {0.48145466f, 0.4578275f, 0.40821073f};
-float stds[3]  = {0.26862954f, 0.26130258f, 0.27577711f};
-
-// Function to clip and preprocess sd_image_f32_t
-sd_image_f32_t clip_preprocess(sd_image_f32_t image, int target_width, int target_height) {
-    float width_scale  = (float)target_width / image.width;
-    float height_scale = (float)target_height / image.height;
-
-    float scale = std::fmax(width_scale, height_scale);
-
-    // Interpolation
-    int resized_width   = (int)(scale * image.width);
-    int resized_height  = (int)(scale * image.height);
-    float* resized_data = (float*)malloc(resized_width * resized_height * image.channel * sizeof(float));
-
-    for (int y = 0; y < resized_height; y++) {
-        for (int x = 0; x < resized_width; x++) {
-            float original_x = (float)x * image.width / resized_width;
-            float original_y = (float)y * image.height / resized_height;
-
-            uint32_t x1 = (uint32_t)original_x;
-            uint32_t y1 = (uint32_t)original_y;
-            uint32_t x2 = std::min(x1 + 1, image.width - 1);
-            uint32_t y2 = std::min(y1 + 1, image.height - 1);
-
-            for (uint32_t k = 0; k < image.channel; k++) {
-                float v1 = *(image.data + y1 * image.width * image.channel + x1 * image.channel + k);
-                float v2 = *(image.data + y1 * image.width * image.channel + x2 * image.channel + k);
-                float v3 = *(image.data + y2 * image.width * image.channel + x1 * image.channel + k);
-                float v4 = *(image.data + y2 * image.width * image.channel + x2 * image.channel + k);
-
-                float x_ratio = original_x - x1;
-                float y_ratio = original_y - y1;
-
-                float value = interpolate(v1, v2, v3, v4, x_ratio, y_ratio);
-
-                *(resized_data + y * resized_width * image.channel + x * image.channel + k) = value;
-            }
-        }
-    }
-
-    // Clip and preprocess
-    int h_offset = std::max((int)(resized_height - target_height) / 2, 0);
-    int w_offset = std::max((int)(resized_width - target_width) / 2, 0);
-
-    sd_image_f32_t result;
-    result.width   = target_width;
-    result.height  = target_height;
-    result.channel = image.channel;
-    result.data    = (float*)malloc(target_height * target_width * image.channel * sizeof(float));
-
-    for (uint32_t k = 0; k < image.channel; k++) {
-        for (uint32_t i = 0; i < result.height; i++) {
-            for (uint32_t j = 0; j < result.width; j++) {
-                int src_y = std::min(static_cast<int>(i + h_offset), resized_height - 1);
-                int src_x = std::min(static_cast<int>(j + w_offset), resized_width - 1);
-                *(result.data + i * result.width * image.channel + j * image.channel + k) =
-                    fmin(fmax(*(resized_data + src_y * resized_width * image.channel + src_x * image.channel + k), 0.0f), 255.0f) / 255.0f;
-            }
-        }
-    }
-
-    // Free allocated memory
-    free(resized_data);
-
-    // Normalize
-    for (uint32_t k = 0; k < image.channel; k++) {
-        for (uint32_t i = 0; i < result.height; i++) {
-            for (uint32_t j = 0; j < result.width; j++) {
-                // *(result.data + i * size * image.channel + j * image.channel + k) = 0.5f;
-                int offset  = i * result.width * image.channel + j * image.channel + k;
-                float value = *(result.data + offset);
-                value       = (value - means[k]) / stds[k];
-                // value = 0.5f;
-                *(result.data + offset) = value;
-            }
-        }
-    }
-
-    return result;
 }
 
 // Ref: https://github.com/AUTOMATIC1111/stable-diffusion-webui/blob/cad87bf4e3e0b0a759afa94e933527c3123d59bc/modules/prompt_parser.py#L345

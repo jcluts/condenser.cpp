@@ -265,25 +265,6 @@ protected:
     std::vector<int> ch_mult = {1, 2, 4, 4};
     int num_res_blocks       = 2;
     int z_channels           = 4;
-    bool video_decoder       = false;
-    int video_kernel_size    = 3;
-
-    virtual std::shared_ptr<GGMLBlock> get_conv_out(int64_t in_channels,
-                                                    int64_t out_channels,
-                                                    std::pair<int, int> kernel_size,
-                                                    std::pair<int, int> stride  = {1, 1},
-                                                    std::pair<int, int> padding = {0, 0}) {
-
-        return std::shared_ptr<GGMLBlock>(new Conv2d(in_channels, out_channels, kernel_size, stride, padding));
-        
-    }
-
-    virtual std::shared_ptr<GGMLBlock> get_resnet_block(int64_t in_channels,
-                                                        int64_t out_channels) {
-
-    return std::shared_ptr<GGMLBlock>(new ResnetBlock(in_channels, out_channels));
-
-    }
 
 public:
     Decoder(int ch,
@@ -291,31 +272,27 @@ public:
             std::vector<int> ch_mult,
             int num_res_blocks,
             int z_channels,
-            bool use_linear_projection = false,
-            bool video_decoder         = false,
-            int video_kernel_size      = 3)
+            bool use_linear_projection = false)
         : ch(ch),
           out_ch(out_ch),
           ch_mult(ch_mult),
           num_res_blocks(num_res_blocks),
-          z_channels(z_channels),
-          video_decoder(video_decoder),
-          video_kernel_size(video_kernel_size) {
+          z_channels(z_channels) {
         int num_resolutions = static_cast<int>(ch_mult.size());
         int block_in        = ch * ch_mult[num_resolutions - 1];
 
         blocks["conv_in"] = std::shared_ptr<GGMLBlock>(new Conv2d(z_channels, block_in, {3, 3}, {1, 1}, {1, 1}));
 
-        blocks["mid.block_1"] = get_resnet_block(block_in, block_in);
+        blocks["mid.block_1"] = std::shared_ptr<GGMLBlock>(new ResnetBlock(block_in, block_in));
         blocks["mid.attn_1"]  = std::shared_ptr<GGMLBlock>(new AttnBlock(block_in, use_linear_projection));
-        blocks["mid.block_2"] = get_resnet_block(block_in, block_in);
+        blocks["mid.block_2"] = std::shared_ptr<GGMLBlock>(new ResnetBlock(block_in, block_in));
 
         for (int i = num_resolutions - 1; i >= 0; i--) {
             int mult      = ch_mult[i];
             int block_out = ch * mult;
             for (int j = 0; j < num_res_blocks + 1; j++) {
                 std::string name = "up." + std::to_string(i) + ".block." + std::to_string(j);
-                blocks[name]     = get_resnet_block(block_in, block_out);
+                blocks[name]     = std::shared_ptr<GGMLBlock>(new ResnetBlock(block_in, block_out));
 
                 block_in = block_out;
             }
@@ -326,10 +303,10 @@ public:
         }
 
         blocks["norm_out"] = std::shared_ptr<GGMLBlock>(new GroupNorm32(block_in));
-        blocks["conv_out"] = get_conv_out(block_in, out_ch, {3, 3}, {1, 1}, {1, 1});
+        blocks["conv_out"] = std::shared_ptr<GGMLBlock>(new Conv2d(block_in, out_ch, {3, 3}, {1, 1}, {1, 1}));
     }
 
-    virtual struct ggml_tensor* forward(GGMLRunnerContext* ctx, struct ggml_tensor* z) {
+    struct ggml_tensor* forward(GGMLRunnerContext* ctx, struct ggml_tensor* z) {
         // z: [N, z_channels, h, w]
         // alpha is always 0
         // merge_strategy is always learned
@@ -379,10 +356,9 @@ public:
 class AutoencodingEngine : public GGMLBlock {
 protected:
     SDVersion version;
-    bool decode_only       = true;
-    bool use_video_decoder = false;
-    bool use_quant         = true;
-    int embed_dim          = 4;
+    bool decode_only = true;
+    bool use_quant   = true;
+    int embed_dim    = 4;
     struct {
         int z_channels           = 4;
         int resolution           = 256;
@@ -397,28 +373,18 @@ protected:
 public:
     AutoencodingEngine(SDVersion version          = VERSION_FLUX2_KLEIN,
                        bool decode_only           = true,
-                       bool use_linear_projection = false,
-                       bool use_video_decoder     = false)
-        : version(version), decode_only(decode_only), use_video_decoder(use_video_decoder) {
-        if (sd_version_is_dit(version)) {
-            if (sd_version_is_flux2(version)) {
-                dd_config.z_channels = 32;
-                embed_dim            = 32;
-            } else {
-                use_quant            = false;
-                dd_config.z_channels = 16;
-            }
-        }
-        if (use_video_decoder) {
-            use_quant = false;
-        }
+                       bool use_linear_projection = false)
+        : version(version), decode_only(decode_only) {
+        // Flux 2 Klein VAE config
+        dd_config.z_channels = 32;
+        embed_dim            = 32;
+
         blocks["decoder"] = std::shared_ptr<GGMLBlock>(new Decoder(dd_config.ch,
                                                                    dd_config.out_ch,
                                                                    dd_config.ch_mult,
                                                                    dd_config.num_res_blocks,
                                                                    dd_config.z_channels,
-                                                                   use_linear_projection,
-                                                                   use_video_decoder));
+                                                                   use_linear_projection));
         if (use_quant) {
             blocks["post_quant_conv"] = std::shared_ptr<GGMLBlock>(new Conv2d(dd_config.z_channels,
                                                                               embed_dim,
@@ -526,9 +492,8 @@ struct AutoEncoderKL : public VAE {
                   bool offload_params_to_cpu,
                   const String2TensorStorage& tensor_storage_map,
                   const std::string prefix,
-                  bool decode_only       = false,
-                  bool use_video_decoder = false,
-                  SDVersion version      = VERSION_FLUX2_KLEIN)
+                  bool decode_only  = false,
+                  SDVersion version = VERSION_FLUX2_KLEIN)
         : decode_only(decode_only), VAE(backend, offload_params_to_cpu) {
         bool use_linear_projection = false;
         for (const auto& [name, tensor_storage] : tensor_storage_map) {
@@ -542,7 +507,7 @@ struct AutoEncoderKL : public VAE {
                 break;
             }
         }
-        ae = AutoencodingEngine(version, decode_only, use_linear_projection, use_video_decoder);
+        ae = AutoencodingEngine(version, decode_only, use_linear_projection);
         ae.init(params_ctx, tensor_storage_map, prefix);
     }
 

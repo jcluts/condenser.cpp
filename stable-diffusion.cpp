@@ -316,7 +316,6 @@ public:
                                                                  tensor_storage_map,
                                                                  "first_stage_model",
                                                                  vae_decode_only,
-                                                                 false,
                                                                  version);
             first_stage_model->alloc_params_buffer();
             first_stage_model->get_param_tensors(tensors, "first_stage_model");
