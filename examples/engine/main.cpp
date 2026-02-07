@@ -218,7 +218,12 @@ static void handle_load(const std::string& id, const json& request, EngineState&
     // VAE decode only — if no ref images are expected, decode-only mode is fine.
     // The caller can set this explicitly, otherwise default to true.
     ctx_params.vae_decode_only         = p.value("vae_decode_only", true);
-    ctx_params.free_params_immediately = p.value("free_params_immediately", true);
+
+    // IMPORTANT: The engine is designed for repeated generation with the same
+    // loaded context.  free_params_immediately=true (the library default) frees
+    // model weight buffers after the first generation, causing use-after-free
+    // crashes on subsequent generations.  Default to false for the engine.
+    ctx_params.free_params_immediately = p.value("free_params_immediately", false);
 
     // Flow shift
     if (p.contains("flow_shift")) {
