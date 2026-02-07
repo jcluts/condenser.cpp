@@ -12,41 +12,41 @@
 #include "denoiser.hpp"
 #include "diffusion_model.hpp"
 #include "easycache.hpp"
-#include "esrgan.hpp"
 #include "vae.hpp"
 
 #include "latent-preview.h"
 #include "name_conversion.h"
 
+// Indexed by SDVersion enum — only Flux 2 entries are meaningful
 const char* model_version_to_str[] = {
-    "SD 1.x",
-    "SD 1.x Inpaint",
-    "Instruct-Pix2Pix",
-    "SD 1.x Tiny UNet",
-    "SD 2.x",
-    "SD 2.x Inpaint",
-    "SD 2.x Tiny UNet",
-    "SDXS",
-    "SDXL",
-    "SDXL Inpaint",
-    "SDXL Instruct-Pix2Pix",
-    "SDXL (Vega)",
-    "SDXL (SSD1B)",
-    "SVD",
-    "SD3.x",
-    "Flux",
-    "Flux Fill",
-    "Flux Control",
-    "Flex.2",
-    "Chroma Radiance",
-    "Wan 2.x",
-    "Wan 2.2 I2V",
-    "Wan 2.2 TI2V",
-    "Qwen Image",
-    "Flux.2",
-    "Flux.2 klein",
-    "Z-Image",
-    "Ovis Image",
+    "(unused)",         // VERSION_SD1
+    "(unused)",         // VERSION_SD1_INPAINT
+    "(unused)",         // VERSION_SD1_PIX2PIX
+    "(unused)",         // VERSION_SD1_TINY_UNET
+    "(unused)",         // VERSION_SD2
+    "(unused)",         // VERSION_SD2_INPAINT
+    "(unused)",         // VERSION_SD2_TINY_UNET
+    "(unused)",         // VERSION_SDXS
+    "(unused)",         // VERSION_SDXL
+    "(unused)",         // VERSION_SDXL_INPAINT
+    "(unused)",         // VERSION_SDXL_PIX2PIX
+    "(unused)",         // VERSION_SDXL_VEGA
+    "(unused)",         // VERSION_SDXL_SSD1B
+    "(unused)",         // VERSION_SVD
+    "(unused)",         // VERSION_SD3
+    "(unused)",         // VERSION_FLUX
+    "(unused)",         // VERSION_FLUX_FILL
+    "(unused)",         // VERSION_FLUX_CONTROLS
+    "(unused)",         // VERSION_FLEX_2
+    "(unused)",         // VERSION_CHROMA_RADIANCE
+    "(unused)",         // VERSION_WAN2
+    "(unused)",         // VERSION_WAN2_2_I2V
+    "(unused)",         // VERSION_WAN2_2_TI2V
+    "(unused)",         // VERSION_QWEN_IMAGE
+    "Flux.2",           // VERSION_FLUX2
+    "Flux.2 Klein",     // VERSION_FLUX2_KLEIN
+    "(unused)",         // VERSION_Z_IMAGE
+    "(unused)",         // VERSION_OVIS_IMAGE
 };
 
 const char* sampling_methods_str[] = {
@@ -67,21 +67,6 @@ const char* sampling_methods_str[] = {
 };
 
 /*================================================== Helper Functions ================================================*/
-
-void calculate_alphas_cumprod(float* alphas_cumprod,
-                              float linear_start = 0.00085f,
-                              float linear_end   = 0.0120,
-                              int timesteps      = TIMESTEPS) {
-    float ls_sqrt = sqrtf(linear_start);
-    float le_sqrt = sqrtf(linear_end);
-    float amount  = le_sqrt - ls_sqrt;
-    float product = 1.0f;
-    for (int i = 0; i < timesteps; i++) {
-        float beta = ls_sqrt + amount * ((float)i / (timesteps - 1));
-        product *= 1.0f - powf(beta, 2.0f);
-        alphas_cumprod[i] = product;
-    }
-}
 
 void suppress_pp(int step, int steps, float time, void* data) {
     (void)step;
@@ -113,18 +98,12 @@ public:
     std::shared_ptr<DiffusionModel> diffusion_model;
     std::shared_ptr<VAE> first_stage_model;
 
-
-    std::string taesd_path;
-    bool use_tiny_autoencoder            = false;
     sd_tiling_params_t vae_tiling_params = {false, 0, 0, 0.5f, 0, 0};
     bool offload_params_to_cpu           = false;
 
-    bool is_using_v_parameterization     = false;
-    bool is_using_edm_v_parameterization = false;
-
     std::map<std::string, struct ggml_tensor*> tensors;
 
-    std::shared_ptr<Denoiser> denoiser = std::make_shared<CompVisDenoiser>();
+    std::shared_ptr<Denoiser> denoiser = std::make_shared<Flux2FlowDenoiser>();
 
     ggml_context* aux_ctx                 = nullptr;
     ggml_tensor* flux2_bn_running_mean    = nullptr;
@@ -220,8 +199,6 @@ public:
         n_threads               = sd_ctx_params->n_threads;
         vae_decode_only         = sd_ctx_params->vae_decode_only;
         free_params_immediately = sd_ctx_params->free_params_immediately;
-        taesd_path              = SAFE_STR(sd_ctx_params->taesd_path);
-        use_tiny_autoencoder    = taesd_path.size() > 0;
         offload_params_to_cpu   = sd_ctx_params->offload_params_to_cpu;
 
         rng = get_rng(sd_ctx_params->rng_type);
@@ -251,15 +228,7 @@ public:
             }
         }
 
-        bool is_unet = false;
-
-        if (strlen(SAFE_STR(sd_ctx_params->clip_l_path)) > 0) {
-            LOG_INFO("loading clip_l from '%s'", sd_ctx_params->clip_l_path);
-            std::string prefix = is_unet ? "cond_stage_model.transformer." : "text_encoders.clip_l.transformer.";
-            if (!model_loader.init_from_file(sd_ctx_params->clip_l_path, prefix)) {
-                LOG_WARN("loading clip_l from '%s' failed", sd_ctx_params->clip_l_path);
-            }
-        }
+        bool is_unet = false;  // Flux2 Klein is always DiT, never UNet
 
         if (strlen(SAFE_STR(sd_ctx_params->llm_path)) > 0) {
             LOG_INFO("loading llm from '%s'", sd_ctx_params->llm_path);
@@ -331,11 +300,6 @@ public:
         scale_factor = 1.0f;
         shift_factor = 0.f;
 
-        bool tae_preview_only = sd_ctx_params->tae_preview_only;
-        if (version == VERSION_SDXS) {
-            tae_preview_only = false;
-        }
-
         if (sd_ctx_params->circular_x || sd_ctx_params->circular_y) {
             LOG_INFO("Using circular padding for convolutions");
         }
@@ -348,18 +312,16 @@ public:
                 LOG_INFO("CLIP: Using CPU backend");
                 clip_backend = ggml_backend_cpu_init();
             }
-            if (sd_version_is_flux2(version)) {
-                bool is_chroma   = false;
-                cond_stage_model = std::make_shared<LLMEmbedder>(clip_backend,
-                                                                 offload_params_to_cpu,
-                                                                 tensor_storage_map,
-                                                                 version);
-                diffusion_model  = std::make_shared<FluxModel>(backend,
-                                                              offload_params_to_cpu,
-                                                              tensor_storage_map,
-                                                              version,
-                                                              false);
-            } 
+
+            cond_stage_model = std::make_shared<LLMEmbedder>(clip_backend,
+                                                             offload_params_to_cpu,
+                                                             tensor_storage_map,
+                                                             version);
+            diffusion_model  = std::make_shared<FluxModel>(backend,
+                                                          offload_params_to_cpu,
+                                                          tensor_storage_map,
+                                                          version,
+                                                          false);
 
             cond_stage_model->alloc_params_buffer();
             cond_stage_model->get_param_tensors(tensors);
@@ -413,22 +375,19 @@ public:
         params.mem_size   = static_cast<size_t>(10 * 1024) * 1024;  // 10M
         params.mem_buffer = nullptr;
         params.no_alloc   = false;
-        // LOG_DEBUG("mem_size %u ", params.mem_size);
-        struct ggml_context* ctx = ggml_init(params);  // for  alphas_cumprod and is_using_v_parameterization check
+        struct ggml_context* ctx = ggml_init(params);
         GGML_ASSERT(ctx != nullptr);
-        ggml_tensor* alphas_cumprod_tensor = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, TIMESTEPS);
-        calculate_alphas_cumprod((float*)alphas_cumprod_tensor->data);
 
         // load weights
         LOG_DEBUG("loading weights");
 
         std::set<std::string> ignore_tensors;
-        tensors["alphas_cumprod"] = alphas_cumprod_tensor;
         ignore_tensors.insert("model.diffusion_model.__x0__");
         ignore_tensors.insert("model.diffusion_model.__32x32__");
         ignore_tensors.insert("model.diffusion_model.__index_timestep_zero__");
 
-        if (sd_version_is_flux2(version)) {
+        // Load Flux2 batch normalization stats from model weights
+        {
             auto find_tensor_storage = [&](const std::string& name, const std::string& suffix) -> const TensorStorage* {
                 auto it = tensor_storage_map.find(name);
                 if (it != tensor_storage_map.end()) {
@@ -497,11 +456,10 @@ public:
         LOG_DEBUG("finished loaded file");
 
         {
-            size_t clip_params_mem_size = cond_stage_model->get_params_buffer_size();
-            size_t unet_params_mem_size = diffusion_model->get_params_buffer_size();
+            size_t clip_params_mem_size      = cond_stage_model->get_params_buffer_size();
+            size_t diffusion_params_mem_size = diffusion_model->get_params_buffer_size();
+            size_t vae_params_mem_size       = first_stage_model ? first_stage_model->get_params_buffer_size() : 0;
 
-            size_t vae_params_mem_size = 0;
- 
             size_t total_params_ram_size  = 0;
             size_t total_params_vram_size = 0;
             if (ggml_backend_is_cpu(clip_backend)) {
@@ -511,9 +469,9 @@ public:
             }
 
             if (ggml_backend_is_cpu(backend)) {
-                total_params_ram_size += unet_params_mem_size;
+                total_params_ram_size += diffusion_params_mem_size;
             } else {
-                total_params_vram_size += unet_params_mem_size;
+                total_params_vram_size += diffusion_params_mem_size;
             }
 
             if (ggml_backend_is_cpu(vae_backend)) {
@@ -521,8 +479,6 @@ public:
             } else {
                 total_params_vram_size += vae_params_mem_size;
             }
-            
-            LOG_DEBUG("Determined back end.");
 
             size_t total_params_size = total_params_ram_size + total_params_vram_size;
             LOG_INFO(
@@ -533,61 +489,17 @@ public:
                 total_params_ram_size / 1024.0 / 1024.0,
                 clip_params_mem_size / 1024.0 / 1024.0,
                 ggml_backend_is_cpu(clip_backend) ? "RAM" : "VRAM",
-                unet_params_mem_size / 1024.0 / 1024.0,
+                diffusion_params_mem_size / 1024.0 / 1024.0,
                 ggml_backend_is_cpu(backend) ? "RAM" : "VRAM",
                 vae_params_mem_size / 1024.0 / 1024.0,
                 ggml_backend_is_cpu(vae_backend) ? "RAM" : "VRAM");
         }
 
-        // init denoiser
-        {
-            prediction_t pred_type = sd_ctx_params->prediction;
-            float flow_shift       = sd_ctx_params->flow_shift;
-
-            pred_type = FLUX2_FLOW_PRED;
-
-
-            LOG_INFO("running in Flux2 FLOW mode");
-            denoiser = std::make_shared<Flux2FlowDenoiser>();
-
-
-            auto comp_vis_denoiser = std::dynamic_pointer_cast<CompVisDenoiser>(denoiser);
-            if (comp_vis_denoiser) {
-                for (int i = 0; i < TIMESTEPS; i++) {
-                    comp_vis_denoiser->sigmas[i]     = std::sqrt((1 - ((float*)alphas_cumprod_tensor->data)[i]) / ((float*)alphas_cumprod_tensor->data)[i]);
-                    comp_vis_denoiser->log_sigmas[i] = std::log(comp_vis_denoiser->sigmas[i]);
-                }
-            }
-        }
+        LOG_INFO("running in Flux2 FLOW mode");
+        // denoiser is already initialized as Flux2FlowDenoiser in member declaration
 
         ggml_free(ctx);
         return true;
-    }
-
-
-
-    std::vector<float> process_timesteps(const std::vector<float>& timesteps,
-                                         ggml_tensor* init_latent,
-                                         ggml_tensor* denoise_mask) {
-
-        return timesteps;
-
-    }
-
-    // a = a * mask + b * (1 - mask)
-    void apply_mask(ggml_tensor* a, ggml_tensor* b, ggml_tensor* mask) {
-        for (int64_t i0 = 0; i0 < a->ne[0]; i0++) {
-            for (int64_t i1 = 0; i1 < a->ne[1]; i1++) {
-                for (int64_t i2 = 0; i2 < a->ne[2]; i2++) {
-                    for (int64_t i3 = 0; i3 < a->ne[3]; i3++) {
-                        float a_value    = ggml_ext_tensor_get_f32(a, i0, i1, i2, i3);
-                        float b_value    = ggml_ext_tensor_get_f32(b, i0, i1, i2, i3);
-                        float mask_value = ggml_ext_tensor_get_f32(mask, i0 % mask->ne[0], i1 % mask->ne[1], i2 % mask->ne[2], i3 % mask->ne[3]);
-                        ggml_ext_tensor_set_f32(a, a_value * mask_value + b_value * (1 - mask_value), i0, i1, i2, i3);
-                    }
-                }
-            }
-        }
     }
 
     void silent_tiling(ggml_tensor* input, ggml_tensor* output, const int scale, const int tile_size, const float tile_overlap_factor, on_tile_process on_processing) {
@@ -607,53 +519,20 @@ public:
                         SDCondition cond,
                         SDCondition uncond,
                         SDCondition img_cond,
-                        ggml_tensor* control_hint,
-                        float control_strength,
                         sd_guidance_params_t guidance,
                         float eta,
-                        int shifted_timestep,
                         sample_method_t method,
                         const std::vector<float>& sigmas,
                         int start_merge_step,
                         std::vector<ggml_tensor*> ref_latents = {},
                         bool increase_ref_index               = false,
-                        ggml_tensor* denoise_mask             = nullptr,
-                        ggml_tensor* vace_context             = nullptr,
-                        float vace_strength                   = 1.f,
                         const sd_cache_params_t* cache_params = nullptr) {
-        if (shifted_timestep > 0 && !sd_version_is_sdxl(version)) {
-            LOG_WARN("timestep shifting is only supported for SDXL models!");
-            shifted_timestep = 0;
-        }
         std::vector<int> skip_layers(guidance.slg.layers, guidance.slg.layers + guidance.slg.layer_count);
 
-        float cfg_scale = guidance.txt_cfg;
-        if (cfg_scale < 1.f) {
-            if (cfg_scale == 0.f) {
-                // Diffusers follow the convention from the original paper
-                // (https://arxiv.org/abs/2207.12598v1), so many distilled model docs
-                // recommend 0 as guidance; warn the user that it'll disable prompt folowing
-                LOG_WARN("unconditioned mode, images won't follow the prompt (use cfg-scale=1 for distilled models)");
-            } else {
-                LOG_WARN("cfg value out of expected range may produce unexpected results");
-            }
-        }
-
-        float img_cfg_scale = std::isfinite(guidance.img_cfg) ? guidance.img_cfg : guidance.txt_cfg;
+        // Flux2 uses embedded guidance only — force CFG to 1.0
+        float cfg_scale     = 1.0f;
+        float img_cfg_scale = 1.0f;
         float slg_scale     = guidance.slg.scale;
-
-        if (sd_version_is_flux2(version)) {
-            if (cfg_scale != 1.0f || img_cfg_scale != 1.0f) {
-                LOG_INFO("Flux2 uses embedded guidance only; forcing cfg scales to 1.0");
-            }
-            cfg_scale     = 1.0f;
-            img_cfg_scale = 1.0f;
-        }
-
-        if (img_cfg_scale != cfg_scale && !sd_version_is_inpaint_or_unet_edit(version)) {
-            LOG_WARN("2-conditioning CFG is not supported with this model, disabling it for better performance...");
-            img_cfg_scale = cfg_scale;
-        }
 
         EasyCacheState easycache_state;
         CacheDitConditionState cachedit_state;
@@ -753,29 +632,19 @@ public:
 
         struct ggml_tensor* noised_input = ggml_dup_tensor(work_ctx, x);
 
-        bool has_unconditioned = img_cfg_scale != 1.0 && uncond.c_crossattn != nullptr;
-        bool has_img_cond      = cfg_scale != img_cfg_scale && img_cond.c_crossattn != nullptr;
+        bool has_unconditioned = cfg_scale != 1.0 && uncond.c_crossattn != nullptr;
         bool has_skiplayer     = slg_scale != 0.0 && skip_layers.size() > 0;
 
         // denoise wrapper
-        struct ggml_tensor* out_cond     = ggml_dup_tensor(work_ctx, x);
-        struct ggml_tensor* out_uncond   = nullptr;
-        struct ggml_tensor* out_skip     = nullptr;
-        struct ggml_tensor* out_img_cond = nullptr;
+        struct ggml_tensor* out_cond   = ggml_dup_tensor(work_ctx, x);
+        struct ggml_tensor* out_uncond = nullptr;
+        struct ggml_tensor* out_skip   = nullptr;
 
         if (has_unconditioned) {
             out_uncond = ggml_dup_tensor(work_ctx, x);
         }
         if (has_skiplayer) {
-            if (sd_version_is_dit(version)) {
-                out_skip = ggml_dup_tensor(work_ctx, x);
-            } else {
-                has_skiplayer = false;
-                LOG_WARN("SLG is incompatible with %s models", model_version_to_str[version]);
-            }
-        }
-        if (has_img_cond) {
-            out_img_cond = ggml_dup_tensor(work_ctx, x);
+            out_skip = ggml_dup_tensor(work_ctx, x);
         }
         struct ggml_tensor* denoised = ggml_dup_tensor(work_ctx, x);
 
@@ -906,7 +775,6 @@ public:
 
             timesteps_vec.assign(1, t);
 
-            timesteps_vec  = process_timesteps(timesteps_vec, init_latent, denoise_mask);
             auto timesteps = vector_to_ggml_tensor(work_ctx, timesteps_vec);
             std::vector<float> guidance_vec(1, guidance.distilled_guidance);
             auto guidance_tensor = vector_to_ggml_tensor(work_ctx, guidance_vec);
@@ -923,9 +791,9 @@ public:
             diffusion_params.ref_latents        = ref_latents;
             diffusion_params.increase_ref_index = increase_ref_index;
             diffusion_params.controls           = controls;
-            diffusion_params.control_strength   = control_strength;
-            diffusion_params.vace_context       = vace_context;
-            diffusion_params.vace_strength      = vace_strength;
+            diffusion_params.control_strength   = 0.0f;
+            diffusion_params.vace_context       = nullptr;
+            diffusion_params.vace_strength      = 1.f;
 
             const SDCondition* active_condition = nullptr;
             struct ggml_tensor** active_output  = &out_cond;
@@ -952,7 +820,6 @@ public:
 
             float* negative_data = nullptr;
             if (has_unconditioned) {
-
                 current_step_skipped      = cache_step_is_skipped();
                 diffusion_params.controls = controls;
                 diffusion_params.context  = uncond.c_crossattn;
@@ -969,24 +836,6 @@ public:
                     cache_after_condition(&uncond, out_uncond);
                 }
                 negative_data = (float*)out_uncond->data;
-            }
-
-            float* img_cond_data = nullptr;
-            if (has_img_cond) {
-                diffusion_params.context  = img_cond.c_crossattn;
-                diffusion_params.c_concat = img_cond.c_concat;
-                diffusion_params.y        = img_cond.c_vector;
-                bool skip_img_cond        = cache_before_condition(&img_cond, out_img_cond);
-                if (!skip_img_cond) {
-                    if (!work_diffusion_model->compute(n_threads,
-                                                       diffusion_params,
-                                                       &out_img_cond)) {
-                        LOG_ERROR("diffusion model compute failed");
-                        return nullptr;
-                    }
-                    cache_after_condition(&img_cond, out_img_cond);
-                }
-                img_cond_data = (float*)out_img_cond->data;
             }
 
             int step_count         = static_cast<int>(sigmas.size());
@@ -1017,28 +866,13 @@ public:
             for (int i = 0; i < ne_elements; i++) {
                 float latent_result = positive_data[i];
                 if (has_unconditioned) {
-                    // out_uncond + cfg_scale * (out_cond - out_uncond)
-                    if (has_img_cond) {
-                        // out_uncond + text_cfg_scale * (out_cond - out_img_cond) + image_cfg_scale * (out_img_cond - out_uncond)
-                        latent_result = negative_data[i] + img_cfg_scale * (img_cond_data[i] - negative_data[i]) + cfg_scale * (positive_data[i] - img_cond_data[i]);
-                    } else {
-                        // img_cfg_scale == cfg_scale
-                        latent_result = negative_data[i] + cfg_scale * (positive_data[i] - negative_data[i]);
-                    }
-                } else if (has_img_cond) {
-                    // img_cfg_scale == 1
-                    latent_result = img_cond_data[i] + cfg_scale * (positive_data[i] - img_cond_data[i]);
+                    latent_result = negative_data[i] + cfg_scale * (positive_data[i] - negative_data[i]);
                 }
                 if (is_skiplayer_step) {
                     latent_result = latent_result + (positive_data[i] - skip_layer_data[i]) * slg_scale;
                 }
-                // v = latent_result, eps = latent_result
-                // denoised = (v * c_out + input * c_skip) or (input + eps * c_out)
+                // denoised = (v * c_out + input * c_skip)
                 vec_denoised[i] = latent_result * c_out + vec_input[i] * c_skip;
-            }
-
-            if (denoise_mask != nullptr) {
-                apply_mask(denoised, init_latent, denoise_mask);
             }
 
             int64_t t1 = ggml_time_us();
@@ -1187,29 +1021,9 @@ public:
             }
         }
 
-        GGML_ASSERT(latent->ne[channel_dim] == 16 || latent->ne[channel_dim] == 48 || latent->ne[channel_dim] == 128);
-        if (latent->ne[channel_dim] == 16) {
-            latents_mean_vec = {-0.7571f, -0.7089f, -0.9113f, 0.1075f, -0.1745f, 0.9653f, -0.1517f, 1.5508f,
-                                0.4134f, -0.0715f, 0.5517f, -0.3632f, -0.1922f, -0.9497f, 0.2503f, -0.2921f};
-            latents_std_vec  = {2.8184f, 1.4541f, 2.3275f, 2.6558f, 1.2196f, 1.7708f, 2.6052f, 2.0743f,
-                                3.2687f, 2.1526f, 2.8652f, 1.5579f, 1.6382f, 1.1253f, 2.8251f, 1.9160f};
-        } else if (latent->ne[channel_dim] == 48) {
-            latents_mean_vec = {-0.2289f, -0.0052f, -0.1323f, -0.2339f, -0.2799f, 0.0174f, 0.1838f, 0.1557f,
-                                -0.1382f, 0.0542f, 0.2813f, 0.0891f, 0.1570f, -0.0098f, 0.0375f, -0.1825f,
-                                -0.2246f, -0.1207f, -0.0698f, 0.5109f, 0.2665f, -0.2108f, -0.2158f, 0.2502f,
-                                -0.2055f, -0.0322f, 0.1109f, 0.1567f, -0.0729f, 0.0899f, -0.2799f, -0.1230f,
-                                -0.0313f, -0.1649f, 0.0117f, 0.0723f, -0.2839f, -0.2083f, -0.0520f, 0.3748f,
-                                0.0152f, 0.1957f, 0.1433f, -0.2944f, 0.3573f, -0.0548f, -0.1681f, -0.0667f};
-            latents_std_vec  = {
-                 0.4765f, 1.0364f, 0.4514f, 1.1677f, 0.5313f, 0.4990f, 0.4818f, 0.5013f,
-                 0.8158f, 1.0344f, 0.5894f, 1.0901f, 0.6885f, 0.6165f, 0.8454f, 0.4978f,
-                 0.5759f, 0.3523f, 0.7135f, 0.6804f, 0.5833f, 1.4146f, 0.8986f, 0.5659f,
-                 0.7069f, 0.5338f, 0.4889f, 0.4917f, 0.4069f, 0.4999f, 0.6866f, 0.4093f,
-                 0.5709f, 0.6065f, 0.6415f, 0.4944f, 0.5726f, 1.2042f, 0.5458f, 1.6887f,
-                 0.3971f, 1.0600f, 0.3943f, 0.5537f, 0.5444f, 0.4089f, 0.7468f, 0.7744f};
-        } else if (latent->ne[channel_dim] == 128) {
-            // flux2
-            latents_mean_vec = {-0.0676f, -0.0715f, -0.0753f, -0.0745f, 0.0223f, 0.0180f, 0.0142f, 0.0184f,
+        GGML_ASSERT(latent->ne[channel_dim] == 128);
+        // Flux2 hardcoded latent statistics (128 channels)
+        latents_mean_vec = {-0.0676f, -0.0715f, -0.0753f, -0.0745f, 0.0223f, 0.0180f, 0.0142f, 0.0184f,
                                 -0.0001f, -0.0063f, -0.0002f, -0.0031f, -0.0272f, -0.0281f, -0.0276f, -0.0290f,
                                 -0.0769f, -0.0672f, -0.0902f, -0.0892f, 0.0168f, 0.0152f, 0.0079f, 0.0086f,
                                 0.0083f, 0.0015f, 0.0003f, -0.0043f, -0.0439f, -0.0419f, -0.0438f, -0.0431f,
@@ -1242,29 +1056,18 @@ public:
                  1.7587f, 1.7500f, 1.7525f, 1.7362f, 1.7616f, 1.7572f, 1.7444f, 1.7430f,
                  1.7509f, 1.7610f, 1.7634f, 1.7612f, 1.7254f, 1.7135f, 1.7321f, 1.7226f,
                  1.7664f, 1.7624f, 1.7718f, 1.7664f, 1.7457f, 1.7441f, 1.7569f, 1.7530f};
-        }
     }
 
     void process_latent_in(ggml_tensor* latent) {
-
-        //flux 2 uses channel dim 2
-        int channel_dim = 2;
+        // Flux2 uses channel dim 2
         std::vector<float> latents_mean_vec;
         std::vector<float> latents_std_vec;
-        get_latents_mean_std_vec(latent, channel_dim, latents_mean_vec, latents_std_vec);
+        get_latents_mean_std_vec(latent, 2, latents_mean_vec, latents_std_vec);
 
-        float mean;
-        float std_;
         for (int i = 0; i < latent->ne[3]; i++) {
-            if (channel_dim == 3) {
-                mean = latents_mean_vec[i];
-                std_ = latents_std_vec[i];
-            }
             for (int j = 0; j < latent->ne[2]; j++) {
-                if (channel_dim == 2) {
-                    mean = latents_mean_vec[j];
-                    std_ = latents_std_vec[j];
-                }
+                float mean = latents_mean_vec[j];
+                float std_ = latents_std_vec[j];
                 for (int k = 0; k < latent->ne[1]; k++) {
                     for (int l = 0; l < latent->ne[0]; l++) {
                         float value = ggml_ext_tensor_get_f32(latent, l, k, j, i);
@@ -1274,28 +1077,18 @@ public:
                 }
             }
         }
-  
     }
 
     void process_latent_out(ggml_tensor* latent) {
-        //flux 2 uses channel dim 2
-        int channel_dim = 2;
+        // Flux2 uses channel dim 2
         std::vector<float> latents_mean_vec;
         std::vector<float> latents_std_vec;
-        get_latents_mean_std_vec(latent, channel_dim, latents_mean_vec, latents_std_vec);
+        get_latents_mean_std_vec(latent, 2, latents_mean_vec, latents_std_vec);
 
-        float mean;
-        float std_;
         for (int i = 0; i < latent->ne[3]; i++) {
-            if (channel_dim == 3) {
-                mean = latents_mean_vec[i];
-                std_ = latents_std_vec[i];
-            }
             for (int j = 0; j < latent->ne[2]; j++) {
-                if (channel_dim == 2) {
-                    mean = latents_mean_vec[j];
-                    std_ = latents_std_vec[j];
-                }
+                float mean = latents_mean_vec[j];
+                float std_ = latents_std_vec[j];
                 for (int k = 0; k < latent->ne[1]; k++) {
                     for (int l = 0; l < latent->ne[0]; l++) {
                         float value = ggml_ext_tensor_get_f32(latent, l, k, j, i);
@@ -1305,7 +1098,6 @@ public:
                 }
             }
         }
-
     }
 
     void get_tile_sizes(int& tile_size_x,
@@ -1337,31 +1129,23 @@ public:
         tile_size_y = get_tile_size(params.tile_size_y, params.rel_size_y, latent_y);
     }
 
-    ggml_tensor* vae_encode(ggml_context* work_ctx, ggml_tensor* x, bool encode_video = false) {
+    ggml_tensor* vae_encode(ggml_context* work_ctx, ggml_tensor* x) {
         int64_t t0                 = ggml_time_ms();
         ggml_tensor* result        = nullptr;
         const int vae_scale_factor = get_vae_scale_factor();
         int64_t W                  = x->ne[0] / vae_scale_factor;
         int64_t H                  = x->ne[1] / vae_scale_factor;
         int64_t C                  = get_latent_channel();
-        if (vae_tiling_params.enabled && !encode_video) {
-            // TODO wan2.2 vae support?
-            int64_t ne2;
-            int64_t ne3;
-
-            int64_t out_channels   = C;
-            bool encode_outputs_mu = sd_version_is_flux2(version);
-            if (!encode_outputs_mu) {
-                out_channels *= 2;
-            }
-            ne2 = out_channels;
-            ne3 = x->ne[3];
+        if (vae_tiling_params.enabled) {
+            // Flux2 encode outputs mu directly (no doubling of channels)
+            int64_t ne2 = C;
+            int64_t ne3 = x->ne[3];
             result = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, W, H, ne2, ne3);
         }
 
         process_vae_input_tensor(x);
 
-        if (vae_tiling_params.enabled && !encode_video) {
+        if (vae_tiling_params.enabled) {
             float tile_overlap;
             int tile_size_x, tile_size_y;
             // multiply tile size for encode to keep the compute buffer size consistent
@@ -1423,12 +1207,12 @@ public:
         return latent;
     }
 
-    ggml_tensor* encode_first_stage(ggml_context* work_ctx, ggml_tensor* x, bool encode_video = false) {
-        ggml_tensor* vae_output = vae_encode(work_ctx, x, encode_video);
+    ggml_tensor* encode_first_stage(ggml_context* work_ctx, ggml_tensor* x) {
+        ggml_tensor* vae_output = vae_encode(work_ctx, x);
         return get_first_stage_encoding(work_ctx, vae_output);
     }
 
-    ggml_tensor* decode_first_stage(ggml_context* work_ctx, ggml_tensor* x, bool decode_video = false) {
+    ggml_tensor* decode_first_stage(ggml_context* work_ctx, ggml_tensor* x) {
         const int vae_scale_factor = get_vae_scale_factor();
         int64_t W                  = x->ne[0] * vae_scale_factor;
         int64_t H                  = x->ne[1] * vae_scale_factor;
@@ -1903,21 +1687,11 @@ void free_sd_ctx(sd_ctx_t* sd_ctx) {
 }
 
 enum sample_method_t sd_get_default_sample_method(const sd_ctx_t* sd_ctx) {
-    if (sd_ctx != nullptr && sd_ctx->sd != nullptr) {
-        if (sd_version_is_dit(sd_ctx->sd->version)) {
-            return EULER_SAMPLE_METHOD;
-        }
-    }
-    return EULER_A_SAMPLE_METHOD;
+    // Flux2 Klein is always a DiT model
+    return EULER_SAMPLE_METHOD;
 }
 
 enum scheduler_t sd_get_default_scheduler(const sd_ctx_t* sd_ctx, enum sample_method_t sample_method) {
-    if (sd_ctx != nullptr && sd_ctx->sd != nullptr) {
-        auto edm_v_denoiser = std::dynamic_pointer_cast<EDMVDenoiser>(sd_ctx->sd->denoiser);
-        if (edm_v_denoiser) {
-            return EXPONENTIAL_SCHEDULER;
-        }
-    }
     if (sample_method == LCM_SAMPLE_METHOD) {
         return LCM_SCHEDULER;
     }
@@ -1932,7 +1706,6 @@ sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
                                     int clip_skip,
                                     sd_guidance_params_t guidance,
                                     float eta,
-                                    int shifted_timestep,
                                     int width,
                                     int height,
                                     enum sample_method_t sample_method,
@@ -1942,8 +1715,6 @@ sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
                                     std::vector<sd_image_t*> ref_images,
                                     std::vector<ggml_tensor*> ref_latents,
                                     bool increase_ref_index,
-                                    ggml_tensor* concat_latent            = nullptr,
-                                    ggml_tensor* denoise_mask             = nullptr,
                                     const sd_cache_params_t* cache_params = nullptr) {
     if (seed < 0) {
         // Generally, when using the provided command line, the seed is always >0.
@@ -1977,12 +1748,9 @@ sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
                                                                                            condition_params);
 
     SDCondition uncond;
-    if (guidance.txt_cfg != 1.0 ||
-        (sd_version_is_inpaint_or_unet_edit(sd_ctx->sd->version) && guidance.txt_cfg != guidance.img_cfg)) {
-        bool zero_out_masked = false;
-
+    if (guidance.txt_cfg != 1.0) {
         condition_params.text            = negative_prompt;
-        condition_params.zero_out_masked = zero_out_masked;
+        condition_params.zero_out_masked = false;
         uncond                           = sd_ctx->sd->cond_stage_model->get_learned_condition(work_ctx,
                                                                                                sd_ctx->sd->n_threads,
                                                                                                condition_params);
@@ -2022,19 +1790,13 @@ sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
                                                      cond,
                                                      uncond,
                                                      img_cond,
-                                                     nullptr,
-                                                     0.0f,
                                                      guidance,
                                                      eta,
-                                                     shifted_timestep,
                                                      sample_method,
                                                      sigmas,
                                                      start_merge_step,
                                                      ref_latents,
                                                      increase_ref_index,
-                                                     denoise_mask,
-                                                     nullptr,
-                                                     1.0f,
                                                      cache_params);
         int64_t sampling_end    = ggml_time_ms();
         if (x_0 != nullptr) {
@@ -2070,7 +1832,7 @@ sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
 
     int64_t t4 = ggml_time_ms();
     LOG_INFO("decode_first_stage completed, taking %.2fs", (t4 - t3) * 1.0f / 1000);
-    if (sd_ctx->sd->free_params_immediately && !sd_ctx->sd->use_tiny_autoencoder) {
+    if (sd_ctx->sd->free_params_immediately) {
         sd_ctx->sd->first_stage_model->free_params_buffer();
     }
 
@@ -2168,23 +1930,17 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
                                                   sd_ctx->sd->version);
     }
 
-    ggml_tensor* init_latent   = nullptr;
-    ggml_tensor* concat_latent = nullptr;
-    ggml_tensor* denoise_mask  = nullptr;
+    ggml_tensor* init_latent = nullptr;
  
     LOG_INFO("TXT2IMG");
     init_latent = sd_ctx->sd->generate_init_latent(work_ctx, width, height);
-    
 
+    // Flux2 uses embedded guidance — force CFG to 1.0
     sd_guidance_params_t guidance = sd_img_gen_params->sample_params.guidance;
-    if (sd_version_is_flux2(sd_ctx->sd->version)) {
-        if (guidance.txt_cfg != 1.0f || guidance.img_cfg != 1.0f) {
-            guidance.txt_cfg = 1.0f;
-            guidance.img_cfg = 1.0f;
-        }
-        if (guidance.distilled_guidance == 3.5f) {
-            guidance.distilled_guidance = 1.0f;
-        }
+    guidance.txt_cfg = 1.0f;
+    guidance.img_cfg = 1.0f;
+    if (guidance.distilled_guidance == 3.5f) {
+        guidance.distilled_guidance = 1.0f;
     }
     std::vector<sd_image_t*> ref_images;
     for (int i = 0; i < sd_img_gen_params->ref_images_count; i++) {
@@ -2192,7 +1948,6 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
     }
 
     std::vector<uint8_t> empty_image_data;
-
 
     if (ref_images.size() > 0) {
         LOG_INFO("EDIT mode");
@@ -2257,7 +2012,6 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
                                                         sd_img_gen_params->clip_skip,
                                                         guidance,
                                                         sd_img_gen_params->sample_params.eta,
-                                                        sd_img_gen_params->sample_params.shifted_timestep,
                                                         width,
                                                         height,
                                                         sample_method,
@@ -2267,8 +2021,6 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
                                                         ref_images,
                                                         ref_latents,
                                                         sd_img_gen_params->increase_ref_index,
-                                                        concat_latent,
-                                                        denoise_mask,
                                                         &sd_img_gen_params->cache);
 
     size_t t2 = ggml_time_ms();
