@@ -223,6 +223,7 @@ typedef struct {
 } sd_img_gen_params_t;
 
 typedef struct sd_ctx_t sd_ctx_t;
+typedef struct sd_condition_t sd_condition_t;
 
 typedef void (*sd_log_cb_t)(enum sd_log_level_t level, const char* text, void* data);
 typedef void (*sd_progress_cb_t)(int step, int steps, float time, void* data);
@@ -264,6 +265,33 @@ SD_API enum scheduler_t sd_get_default_scheduler(const sd_ctx_t* sd_ctx, enum sa
 SD_API void sd_img_gen_params_init(sd_img_gen_params_t* sd_img_gen_params);
 SD_API char* sd_img_gen_params_to_str(const sd_img_gen_params_t* sd_img_gen_params);
 SD_API sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_gen_params);
+
+// --- Prompt conditioning cache API ---
+// These functions allow callers to pre-compute and cache the text encoder
+// output (conditioning), then reuse it across multiple generations with
+// different seeds, dimensions, or sampling parameters.
+
+// Compute conditioning from a prompt without generating an image.
+// The returned sd_condition_t* owns its memory and is independent of any
+// ggml_context — it can be stored indefinitely and reused.
+// ref_images/ref_images_count are used only if the conditioner needs them
+// (typically NULL/0 for text-only conditioning).
+SD_API sd_condition_t* sd_compute_condition(sd_ctx_t* ctx,
+                                            const char* prompt,
+                                            int width,
+                                            int height,
+                                            sd_image_t* ref_images,
+                                            int ref_images_count);
+
+// Generate image(s) using a pre-computed condition, skipping the text encoder.
+// All other parameters (seed, dimensions, sampling, etc.) come from params.
+// The prompt field in params is ignored when condition is provided.
+SD_API sd_image_t* generate_image_with_condition(sd_ctx_t* sd_ctx,
+                                                 const sd_img_gen_params_t* params,
+                                                 const sd_condition_t* condition);
+
+// Free a condition returned by sd_compute_condition().
+SD_API void sd_free_condition(sd_condition_t* condition);
 
 typedef struct upscaler_ctx_t upscaler_ctx_t;
 

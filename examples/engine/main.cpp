@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "stable-diffusion.h"
@@ -96,10 +97,70 @@ static void json_progress_cb(int step, int steps, float time, void* data) {
 // Engine state
 // ---------------------------------------------------------------------------
 
+// Maximum number of cached prompt conditions before LRU eviction kicks in.
+// Each entry is typically ~15 MB (Qwen hidden states), so 16 entries ≈ 240 MB.
+constexpr size_t MAX_PROMPT_CACHE_ENTRIES = 16;
+
+struct CachedCondition {
+    sd_condition_t* condition = nullptr;
+    std::chrono::steady_clock::time_point last_used;
+
+    CachedCondition() = default;
+    CachedCondition(sd_condition_t* c) : condition(c), last_used(std::chrono::steady_clock::now()) {}
+
+    ~CachedCondition() {
+        if (condition) { sd_free_condition(condition); condition = nullptr; }
+    }
+
+    // Non-copyable, movable
+    CachedCondition(const CachedCondition&) = delete;
+    CachedCondition& operator=(const CachedCondition&) = delete;
+    CachedCondition(CachedCondition&& o) noexcept
+        : condition(o.condition), last_used(o.last_used) { o.condition = nullptr; }
+    CachedCondition& operator=(CachedCondition&& o) noexcept {
+        if (this != &o) {
+            if (condition) sd_free_condition(condition);
+            condition = o.condition;
+            last_used = o.last_used;
+            o.condition = nullptr;
+        }
+        return *this;
+    }
+};
+
 struct EngineState {
     sd_ctx_t* ctx                  = nullptr;
     std::string loaded_model_info;                     // human-readable name for status
     std::chrono::steady_clock::time_point load_time;   // when the model was loaded
+
+    // Prompt conditioning cache — keyed by prompt string.
+    // Cleared on model load/unload since different models produce different conditioning.
+    std::unordered_map<std::string, CachedCondition> prompt_cache;
+
+    void clear_prompt_cache() {
+        if (!prompt_cache.empty()) {
+            fprintf(stderr, "[INFO ] Clearing prompt cache (%zu entries).\n", prompt_cache.size());
+            fflush(stderr);
+        }
+        prompt_cache.clear();
+    }
+
+    // Evict the least-recently-used entry if the cache is at capacity.
+    void evict_prompt_cache_if_needed() {
+        if (prompt_cache.size() < MAX_PROMPT_CACHE_ENTRIES) return;
+        auto oldest = prompt_cache.end();
+        for (auto it = prompt_cache.begin(); it != prompt_cache.end(); ++it) {
+            if (oldest == prompt_cache.end() || it->second.last_used < oldest->second.last_used) {
+                oldest = it;
+            }
+        }
+        if (oldest != prompt_cache.end()) {
+            fprintf(stderr, "[INFO ] Prompt cache full (%zu entries), evicting LRU entry.\n",
+                    prompt_cache.size());
+            fflush(stderr);
+            prompt_cache.erase(oldest);
+        }
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -154,6 +215,7 @@ static void handle_status(const std::string& id, const EngineState& state) {
 
 static void handle_unload(const std::string& id, EngineState& state) {
     if (state.ctx) {
+        state.clear_prompt_cache();
         free_sd_ctx(state.ctx);
         state.ctx = nullptr;
         state.loaded_model_info.clear();
@@ -164,6 +226,7 @@ static void handle_unload(const std::string& id, EngineState& state) {
 }
 
 static void handle_quit(const std::string& id, EngineState& state) {
+    state.clear_prompt_cache();
     if (state.ctx) {
         free_sd_ctx(state.ctx);
         state.ctx = nullptr;
@@ -182,6 +245,7 @@ static void handle_load(const std::string& id, const json& request, EngineState&
 
     // Free any existing context first
     if (state.ctx) {
+        state.clear_prompt_cache();
         free_sd_ctx(state.ctx);
         state.ctx = nullptr;
         state.loaded_model_info.clear();
@@ -279,6 +343,9 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
     int64_t seed       = p.value("seed", (int64_t)42);
     int batch_count    = p.value("batch_count", 1);
 
+    // Prompt conditioning cache control (default: enabled)
+    bool use_prompt_cache = p.value("use_prompt_cache", true);
+
     // Sampling params
     sd_sample_params_t sample_params;
     sd_sample_params_init(&sample_params);
@@ -327,7 +394,7 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
         if (vt.contains("rel_size_y")) vae_tiling.rel_size_y = vt["rel_size_y"].get<float>();
     }
 
-    // Cache params
+    // Cache params (step caching — EasyCache/CacheDIT, not prompt cache)
     sd_cache_params_t cache_params;
     sd_cache_params_init(&cache_params);
     if (p.contains("cache") && p["cache"].is_object()) {
@@ -385,8 +452,59 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
         }
     }
 
-    // Send progress: conditioning phase starting
-    write_progress(id, {{"phase", "conditioning"}, {"message", "Running text encoder..."}});
+    // --- Prompt conditioning cache logic ---
+    // Check if we have a cached condition for this prompt.
+    // The cache key is the prompt string.  Width/height are NOT part of the
+    // key because the Flux2 Klein conditioner (LLMEmbedder) does not use them.
+    const sd_condition_t* cached_condition = nullptr;
+    bool prompt_cache_hit = false;
+
+    if (use_prompt_cache && !prompt.empty()) {
+        auto it = state.prompt_cache.find(prompt);
+        if (it != state.prompt_cache.end()) {
+            // Cache hit — update last_used timestamp
+            it->second.last_used = std::chrono::steady_clock::now();
+            cached_condition = it->second.condition;
+            prompt_cache_hit = true;
+            write_progress(id, {
+                {"phase", "conditioning"},
+                {"message", "Prompt cache hit — skipping text encoder"},
+                {"cache_hit", true}
+            });
+            fprintf(stderr, "[INFO ] Prompt cache hit for: \"%s\"\n",
+                    prompt.substr(0, 60).c_str());
+            fflush(stderr);
+        } else {
+            write_progress(id, {
+                {"phase", "conditioning"},
+                {"message", "Running text encoder (will cache result)..."},
+                {"cache_hit", false}
+            });
+        }
+    } else {
+        write_progress(id, {{"phase", "conditioning"}, {"message", "Running text encoder..."}});
+    }
+
+    // If cache miss and caching is enabled, compute condition separately and cache it
+    if (use_prompt_cache && !prompt.empty() && !prompt_cache_hit) {
+        sd_condition_t* new_condition = sd_compute_condition(
+            state.ctx, prompt.c_str(), width, height,
+            ref_images.empty() ? nullptr : ref_images.data(),
+            static_cast<int>(ref_images.size()));
+
+        if (new_condition) {
+            // Evict LRU if needed before inserting
+            state.evict_prompt_cache_if_needed();
+            cached_condition = new_condition;
+            state.prompt_cache.emplace(prompt, CachedCondition(new_condition));
+            fprintf(stderr, "[INFO ] Prompt cached: \"%s\" (cache size: %zu)\n",
+                    prompt.substr(0, 60).c_str(), state.prompt_cache.size());
+            fflush(stderr);
+        } else {
+            fprintf(stderr, "[WARN ] sd_compute_condition failed, falling back to generate_image\n");
+            fflush(stderr);
+        }
+    }
 
     // Set up progress callback for sampling steps
     ProgressCtx prog_ctx{id};
@@ -409,7 +527,15 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
     img_gen_params.cache             = cache_params;
 
     // --- Run generation ---
-    sd_image_t* results = generate_image(state.ctx, &img_gen_params);
+    sd_image_t* results = nullptr;
+
+    if (cached_condition) {
+        // Use the cached condition — skips the text encoder inside generate
+        results = generate_image_with_condition(state.ctx, &img_gen_params, cached_condition);
+    } else {
+        // No cached condition — run the full pipeline
+        results = generate_image(state.ctx, &img_gen_params);
+    }
 
     // Clear progress callback
     sd_set_progress_callback(nullptr, nullptr);
@@ -486,7 +612,8 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
         {"success", true},
         {"seed", seed},
         {"total_time_ms", elapsed_ms},
-        {"images_saved", saved_count}
+        {"images_saved", saved_count},
+        {"prompt_cache_hit", prompt_cache_hit}
     };
     if (output_paths.size() == 1) {
         result_data["output"] = output_paths[0];
@@ -561,6 +688,7 @@ int main(int argc, const char* argv[]) {
     }
 
     // Clean shutdown if stdin closes (parent process died)
+    state.clear_prompt_cache();
     if (state.ctx) {
         fprintf(stderr, "[INFO ] stdin closed — cleaning up.\n");
         fflush(stderr);

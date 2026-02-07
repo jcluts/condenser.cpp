@@ -119,15 +119,18 @@ Generates images using the currently loaded model. Fails if no model is loaded.
     },
     "cache": {
       "mode": "disabled"
-    }
+    },
+    "use_prompt_cache": true
   }
 }
 ```
 
+**`use_prompt_cache`** (default: `true`): When enabled, the engine caches the text encoder (LLM) output keyed by prompt string. On subsequent generations with the same prompt but a different seed, dimensions, or sampling settings, the text encoder is skipped entirely — saving ~0.5-2s per generation. The cache is automatically cleared on model load/unload. Up to 16 prompt conditions are cached with LRU eviction.
+
 During generation, the engine emits streaming progress messages:
 
 ```json
-{"id": "req-2", "type": "progress", "data": {"phase": "conditioning", "message": "Running text encoder..."}}
+{"id": "req-2", "type": "progress", "data": {"phase": "conditioning", "message": "Prompt cache hit — skipping text encoder", "cache_hit": true}}
 {"id": "req-2", "type": "progress", "data": {"phase": "sampling", "step": 1, "total_steps": 4, "step_time_s": 1.2}}
 {"id": "req-2", "type": "progress", "data": {"phase": "sampling", "step": 2, "total_steps": 4, "step_time_s": 0.9}}
 {"id": "req-2", "type": "progress", "data": {"phase": "sampling", "step": 3, "total_steps": 4, "step_time_s": 0.9}}
@@ -135,9 +138,14 @@ During generation, the engine emits streaming progress messages:
 {"id": "req-2", "type": "progress", "data": {"phase": "saving", "message": "Saving output..."}}
 ```
 
-Final result:
+On the first generation with a new prompt, the conditioning progress will show `"cache_hit": false`:
 ```json
-{"id": "req-2", "type": "result", "data": {"success": true, "output": "/path/to/output.png", "seed": 42, "total_time_ms": 4200, "images_saved": 1}}
+{"id": "req-2", "type": "progress", "data": {"phase": "conditioning", "message": "Running text encoder (will cache result)...", "cache_hit": false}}
+```
+
+Final result (includes `prompt_cache_hit` field):
+```json
+{"id": "req-2", "type": "result", "data": {"success": true, "output": "/path/to/output.png", "seed": 42, "total_time_ms": 4200, "images_saved": 1, "prompt_cache_hit": false}}
 ```
 
 #### `unload` — Free VRAM
@@ -299,6 +307,32 @@ The engine is built by default when `SD_BUILD_EXAMPLES` is ON (the default). To 
 ```bash
 cmake .. -DSD_BUILD_EXAMPLES=OFF
 ```
+
+## Prompt Conditioning Cache
+
+The engine includes a built-in LRU cache for text encoder (LLM) conditioning results. When you generate multiple images with the same prompt but different seeds, the expensive Qwen text encoder forward pass (~0.5-2s) is skipped on subsequent generations.
+
+**How it works:**
+1. First generation with a prompt: runs the full text encoder, caches the result
+2. Subsequent generations with the same prompt: skips the text encoder, uses the cached condition
+3. Generation with a different prompt: runs the text encoder, caches the new result
+
+**Cache management:**
+- Up to 16 prompt conditions are cached (LRU eviction when full)
+- Cache is automatically cleared on `load` (model change) or `unload`
+- Disable per-request with `"use_prompt_cache": false` in generate params
+
+**Library API:** The cache is built on top of three new C API functions exposed by the library:
+- `sd_compute_condition()` — compute conditioning from a prompt (standalone)
+- `generate_image_with_condition()` — generate using pre-computed conditioning
+- `sd_free_condition()` — free a cached condition
+
+These are available to any application linking against the library, not just the engine.
+
+| Workflow | Without Cache | With Cache |
+|----------|---------------|------------|
+| Same prompt, new seed | ~0.5-2s conditioning | **~1ms deserialize** |
+| Different prompt | ~0.5-2s conditioning | ~0.5-2s conditioning (new cache entry) |
 
 ## Version
 

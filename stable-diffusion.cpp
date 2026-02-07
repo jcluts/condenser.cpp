@@ -17,6 +17,88 @@
 #include "latent-preview.h"
 #include "name_conversion.h"
 
+// ---------------------------------------------------------------------------
+// sd_condition_t — self-contained serialized conditioning result
+// ---------------------------------------------------------------------------
+
+struct sd_condition_t {
+    // Serialized tensor data (F32) and shapes for each component of SDCondition.
+    // These own their memory and are independent of any ggml_context.
+    std::vector<float> crossattn_data;
+    int64_t crossattn_ne[4] = {0, 0, 0, 0};
+    int      crossattn_n_dims = 0;
+
+    std::vector<float> vector_data;
+    int64_t vector_ne[4] = {0, 0, 0, 0};
+    int      vector_n_dims = 0;
+
+    std::vector<float> concat_data;
+    int64_t concat_ne[4] = {0, 0, 0, 0};
+    int      concat_n_dims = 0;
+};
+
+// Serialize an SDCondition (whose tensors live in a work_ctx) into an
+// sd_condition_t that owns copies of the data.
+static sd_condition_t* serialize_condition(const SDCondition& cond) {
+    auto* out = new sd_condition_t();
+
+    auto copy_tensor = [](struct ggml_tensor* t,
+                          std::vector<float>& data,
+                          int64_t ne[4],
+                          int& n_dims) {
+        if (!t) {
+            n_dims = 0;
+            return;
+        }
+        n_dims = ggml_n_dims(t);
+        for (int d = 0; d < 4; d++) ne[d] = t->ne[d];
+        int64_t n = ggml_nelements(t);
+        data.resize(n);
+        // The tensor should be F32 (conditioner output is always F32)
+        if (t->type == GGML_TYPE_F32) {
+            memcpy(data.data(), t->data, n * sizeof(float));
+        } else {
+            // Fallback: element-wise copy via accessor
+            for (int64_t i = 0; i < n; i++) {
+                // Flatten: ggml stores data contiguously for dense tensors
+                data[i] = ggml_get_f32_1d(t, i);
+            }
+        }
+    };
+
+    copy_tensor(cond.c_crossattn, out->crossattn_data, out->crossattn_ne, out->crossattn_n_dims);
+    copy_tensor(cond.c_vector,    out->vector_data,    out->vector_ne,    out->vector_n_dims);
+    copy_tensor(cond.c_concat,    out->concat_data,    out->concat_ne,    out->concat_n_dims);
+
+    return out;
+}
+
+// Deserialize an sd_condition_t back into an SDCondition with tensors
+// allocated in the provided work_ctx.
+static SDCondition deserialize_condition(ggml_context* work_ctx, const sd_condition_t* cached) {
+    auto restore_tensor = [&](const std::vector<float>& data,
+                              const int64_t ne[4],
+                              int n_dims) -> struct ggml_tensor* {
+        if (n_dims == 0 || data.empty()) return nullptr;
+        struct ggml_tensor* t = nullptr;
+        switch (n_dims) {
+            case 1: t = ggml_new_tensor_1d(work_ctx, GGML_TYPE_F32, ne[0]); break;
+            case 2: t = ggml_new_tensor_2d(work_ctx, GGML_TYPE_F32, ne[0], ne[1]); break;
+            case 3: t = ggml_new_tensor_3d(work_ctx, GGML_TYPE_F32, ne[0], ne[1], ne[2]); break;
+            case 4: t = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, ne[0], ne[1], ne[2], ne[3]); break;
+            default: return nullptr;
+        }
+        memcpy(t->data, data.data(), data.size() * sizeof(float));
+        return t;
+    };
+
+    SDCondition cond;
+    cond.c_crossattn = restore_tensor(cached->crossattn_data, cached->crossattn_ne, cached->crossattn_n_dims);
+    cond.c_vector    = restore_tensor(cached->vector_data,    cached->vector_ne,    cached->vector_n_dims);
+    cond.c_concat    = restore_tensor(cached->concat_data,    cached->concat_ne,    cached->concat_n_dims);
+    return cond;
+}
+
 // Indexed by SDVersion enum
 const char* model_version_to_str[] = {
     "Flux.2",           // VERSION_FLUX2
@@ -1497,7 +1579,8 @@ sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
                                     std::vector<sd_image_t*> ref_images,
                                     std::vector<ggml_tensor*> ref_latents,
                                     bool increase_ref_index,
-                                    const sd_cache_params_t* cache_params = nullptr) {
+                                    const sd_cache_params_t* cache_params = nullptr,
+                                    const sd_condition_t* precomputed_condition = nullptr) {
     if (seed < 0) {
         // Generally, when using the provided command line, the seed is always >0.
         // However, to prevent potential issues if 'stable-diffusion.cpp' is invoked as a library
@@ -1509,25 +1592,35 @@ sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
     int sample_steps = static_cast<int>(sigmas.size() - 1);
 
     int64_t t0 = ggml_time_ms();
+    int64_t t1 = t0;  // will be updated after conditioning
 
-    ConditionerParams condition_params;
-    condition_params.text            = prompt;
-    condition_params.width           = width;
-    condition_params.height          = height;
-    condition_params.ref_images      = ref_images;
+    SDCondition cond;
 
+    if (precomputed_condition) {
+        // Use pre-computed condition — skip the text encoder entirely
+        cond = deserialize_condition(work_ctx, precomputed_condition);
+        t1 = ggml_time_ms();
+        LOG_INFO("using pre-computed condition (prompt cache hit), deserialized in %" PRId64 " ms", t1 - t0);
+    } else {
+        // Compute condition from prompt
+        ConditionerParams condition_params;
+        condition_params.text            = prompt;
+        condition_params.width           = width;
+        condition_params.height          = height;
+        condition_params.ref_images      = ref_images;
 
-    // Get learned condition
-    condition_params.zero_out_masked = false;
-    SDCondition cond                 = sd_ctx->sd->cond_stage_model->get_learned_condition(work_ctx,
-                                                                                           sd_ctx->sd->n_threads,
-                                                                                           condition_params);
+        // Get learned condition
+        condition_params.zero_out_masked = false;
+        cond                             = sd_ctx->sd->cond_stage_model->get_learned_condition(work_ctx,
+                                                                                               sd_ctx->sd->n_threads,
+                                                                                               condition_params);
 
-    int64_t t1 = ggml_time_ms();
-    LOG_INFO("get_learned_condition completed, taking %" PRId64 " ms", t1 - t0);
+        t1 = ggml_time_ms();
+        LOG_INFO("get_learned_condition completed, taking %" PRId64 " ms", t1 - t0);
 
-    if (sd_ctx->sd->free_params_immediately) {
-        sd_ctx->sd->cond_stage_model->free_params_buffer();
+        if (sd_ctx->sd->free_params_immediately) {
+            sd_ctx->sd->cond_stage_model->free_params_buffer();
+        }
     }
 
     // Sample
@@ -1756,4 +1849,201 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
     LOG_INFO("generate_image completed in %.2fs", (t2 - t0) * 1.0f / 1000);
 
     return result_images;
+}
+
+// ---------------------------------------------------------------------------
+// Prompt conditioning cache API
+// ---------------------------------------------------------------------------
+
+sd_condition_t* sd_compute_condition(sd_ctx_t* ctx,
+                                     const char* prompt,
+                                     int width,
+                                     int height,
+                                     sd_image_t* ref_images,
+                                     int ref_images_count) {
+    if (!ctx || !ctx->sd || !ctx->sd->cond_stage_model) {
+        LOG_ERROR("sd_compute_condition: invalid context or no conditioner loaded");
+        return nullptr;
+    }
+
+    // Allocate a temporary work_ctx for the computation
+    struct ggml_init_params params;
+    params.mem_size   = static_cast<size_t>(512) * 1024 * 1024;  // 512 MB
+    params.mem_buffer = nullptr;
+    params.no_alloc   = false;
+
+    struct ggml_context* work_ctx = ggml_init(params);
+    if (!work_ctx) {
+        LOG_ERROR("sd_compute_condition: ggml_init() failed");
+        return nullptr;
+    }
+
+    int64_t t0 = ggml_time_ms();
+
+    ConditionerParams cond_params;
+    cond_params.text   = SAFE_STR(prompt);
+    cond_params.width  = width;
+    cond_params.height = height;
+
+    // Build ref_images vector if provided
+    std::vector<sd_image_t*> refs;
+    for (int i = 0; i < ref_images_count; i++) {
+        refs.push_back(&ref_images[i]);
+    }
+    cond_params.ref_images      = refs;
+    cond_params.zero_out_masked = false;
+
+    SDCondition cond = ctx->sd->cond_stage_model->get_learned_condition(
+        work_ctx, ctx->sd->n_threads, cond_params);
+
+    int64_t t1 = ggml_time_ms();
+    LOG_INFO("sd_compute_condition completed, taking %" PRId64 " ms", t1 - t0);
+
+    // Serialize the condition (copies tensor data out of work_ctx)
+    sd_condition_t* result = serialize_condition(cond);
+
+    // Free work_ctx — the serialized data is self-contained
+    ggml_free(work_ctx);
+
+    return result;
+}
+
+sd_image_t* generate_image_with_condition(sd_ctx_t* sd_ctx,
+                                          const sd_img_gen_params_t* sd_img_gen_params,
+                                          const sd_condition_t* condition) {
+    if (!sd_ctx || !sd_ctx->sd || !condition) {
+        LOG_ERROR("generate_image_with_condition: invalid arguments");
+        return nullptr;
+    }
+
+    sd_ctx->sd->vae_tiling_params = sd_img_gen_params->vae_tiling_params;
+    int width                     = sd_img_gen_params->width;
+    int height                    = sd_img_gen_params->height;
+
+    int vae_scale_factor            = sd_ctx->sd->get_vae_scale_factor();
+    int diffusion_model_down_factor = sd_ctx->sd->get_diffusion_model_down_factor();
+    int spatial_multiple            = vae_scale_factor * diffusion_model_down_factor;
+
+    int width_offset  = align_up_offset(width, spatial_multiple);
+    int height_offset = align_up_offset(height, spatial_multiple);
+    if (width_offset > 0 || height_offset > 0) {
+        width += width_offset;
+        height += height_offset;
+        LOG_WARN("align up %dx%d to %dx%d (multiple=%d)",
+                 sd_img_gen_params->width, sd_img_gen_params->height,
+                 width, height, spatial_multiple);
+    }
+
+    LOG_DEBUG("generate_image_with_condition %dx%d", width, height);
+
+    struct ggml_init_params params;
+    params.mem_size   = static_cast<size_t>(1024 * 1024) * 1024;  // 1G
+    params.mem_buffer = nullptr;
+    params.no_alloc   = false;
+
+    struct ggml_context* work_ctx = ggml_init(params);
+    if (!work_ctx) {
+        LOG_ERROR("ggml_init() failed");
+        return nullptr;
+    }
+
+    int64_t seed = sd_img_gen_params->seed;
+    if (seed < 0) {
+        srand((int)time(nullptr));
+        seed = rand();
+    }
+    sd_ctx->sd->rng->manual_seed(seed);
+    sd_ctx->sd->sampler_rng->manual_seed(seed);
+
+    size_t t0 = ggml_time_ms();
+
+    enum sample_method_t sample_method = sd_img_gen_params->sample_params.sample_method;
+    if (sample_method == SAMPLE_METHOD_COUNT) {
+        sample_method = sd_get_default_sample_method(sd_ctx);
+    }
+    LOG_INFO("sampling using %s method", sampling_methods_str[sample_method]);
+
+    int sample_steps = sd_img_gen_params->sample_params.sample_steps;
+    if (sd_version_is_flux2(sd_ctx->sd->version) &&
+        sd_img_gen_params->sample_params.custom_sigmas_count == 0 &&
+        sample_steps == 20) {
+        LOG_INFO("Flux2 distilled default steps detected; using 4 steps");
+        sample_steps = 4;
+    }
+    std::vector<float> sigmas;
+    if (sd_img_gen_params->sample_params.custom_sigmas_count > 0) {
+        sigmas = std::vector<float>(
+            sd_img_gen_params->sample_params.custom_sigmas,
+            sd_img_gen_params->sample_params.custom_sigmas +
+                sd_img_gen_params->sample_params.custom_sigmas_count);
+        if (sample_steps != sigmas.size() - 1) {
+            sample_steps = static_cast<int>(sigmas.size()) - 1;
+            LOG_WARN("sample_steps != custom_sigmas_count - 1, set sample_steps to %d", sample_steps);
+        }
+    } else {
+        scheduler_t scheduler = sd_img_gen_params->sample_params.scheduler;
+        if (scheduler == SCHEDULER_COUNT) {
+            scheduler = sd_get_default_scheduler(sd_ctx, sample_method);
+        }
+        sigmas = sd_ctx->sd->denoiser->get_sigmas(
+            sample_steps,
+            sd_ctx->sd->get_image_seq_len(height, width),
+            scheduler,
+            sd_ctx->sd->version);
+    }
+
+    ggml_tensor* init_latent = nullptr;
+    LOG_INFO("TXT2IMG (with pre-computed condition)");
+    init_latent = sd_ctx->sd->generate_init_latent(work_ctx, width, height);
+
+    float distilled_guidance = sd_img_gen_params->sample_params.guidance.distilled_guidance;
+    if (distilled_guidance == 3.5f) {
+        distilled_guidance = 1.0f;
+    }
+
+    // Encode reference images to latents
+    std::vector<sd_image_t*> ref_images;
+    for (int i = 0; i < sd_img_gen_params->ref_images_count; i++) {
+        ref_images.push_back(&sd_img_gen_params->ref_images[i]);
+    }
+
+    std::vector<ggml_tensor*> ref_latents;
+    for (int i = 0; i < (int)ref_images.size(); i++) {
+        ggml_tensor* img = ggml_new_tensor_4d(work_ctx,
+                                              GGML_TYPE_F32,
+                                              ref_images[i]->width,
+                                              ref_images[i]->height,
+                                              3, 1);
+        sd_image_to_ggml_tensor(*ref_images[i], img);
+        ggml_tensor* latent = sd_ctx->sd->encode_first_stage(work_ctx, img);
+        ref_latents.push_back(latent);
+    }
+
+    if (sd_img_gen_params->ref_images_count > 0) {
+        size_t t1 = ggml_time_ms();
+        LOG_INFO("encode_first_stage completed, taking %.2fs", (t1 - t0) * 1.0f / 1000);
+    }
+
+    // Generate with pre-computed condition
+    sd_image_t* result_images = generate_image_internal(
+        sd_ctx, work_ctx, init_latent,
+        SAFE_STR(sd_img_gen_params->prompt),
+        distilled_guidance,
+        sd_img_gen_params->sample_params.eta,
+        width, height,
+        sample_method, sigmas, seed,
+        sd_img_gen_params->batch_count,
+        ref_images, ref_latents,
+        sd_img_gen_params->increase_ref_index,
+        &sd_img_gen_params->cache,
+        condition);  // pass pre-computed condition
+
+    size_t t2 = ggml_time_ms();
+    LOG_INFO("generate_image_with_condition completed in %.2fs", (t2 - t0) * 1.0f / 1000);
+
+    return result_images;
+}
+
+void sd_free_condition(sd_condition_t* condition) {
+    delete condition;
 }
