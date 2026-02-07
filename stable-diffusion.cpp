@@ -1196,32 +1196,7 @@ public:
         int64_t t0 = ggml_time_ms();
         LOG_DEBUG("computing vae decode graph...");
         process_latent_out(x);
-        // x = load_tensor_from_file(work_ctx, "wan_vae_z.bin");
 
-        // Dump latent for standalone VAE bypass tool
-        {
-            const char* dump_path = getenv("CONDENSER_DUMP_LATENT");
-            if (dump_path) {
-                FILE* f = fopen(dump_path, "wb");
-                if (f) {
-                    // Header: magic, ndims, ne[0..3], type
-                    uint32_t magic = 0x4C415432;  // "LAT2"
-                    uint32_t ndims = 4;
-                    fwrite(&magic, 4, 1, f);
-                    fwrite(&ndims, 4, 1, f);
-                    for (int d = 0; d < 4; d++) {
-                        int64_t ne = x->ne[d];
-                        fwrite(&ne, 8, 1, f);
-                    }
-                    // Write raw f32 data in ggml layout (ne[0] varies fastest)
-                    int64_t total = ggml_nelements(x);
-                    fwrite(x->data, sizeof(float), total, f);
-                    fclose(f);
-                    LOG_INFO("Dumped latent to %s: [%" PRId64 ", %" PRId64 ", %" PRId64 ", %" PRId64 "] (%d floats)",
-                             dump_path, x->ne[0], x->ne[1], x->ne[2], x->ne[3], (int)total);
-                }
-            }
-        }
         if (vae_tiling_params.enabled) {
             LOG_DEBUG("VAE decode with tiling");
             float tile_overlap;
