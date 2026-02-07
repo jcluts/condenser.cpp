@@ -703,6 +703,14 @@ namespace Flux {
         SDVersion version;
         bool use_mask = false;
 
+        // PE cache invalidation tracking (Item 1 from PERF_AUDIT.md)
+        int cached_pe_h       = -1;
+        int cached_pe_w       = -1;
+        int cached_pe_ctx_len = -1;
+        size_t cached_pe_n_refs = 0;
+        bool cached_pe_circ_x = false;
+        bool cached_pe_circ_y = false;
+
         FluxRunner(ggml_backend_t backend,
                    bool offload_params_to_cpu,
                    const String2TensorStorage& tensor_storage_map = {},
@@ -823,20 +831,39 @@ namespace Flux {
             //flux 2 klein
             txt_arange_dims    = {3};
             increase_ref_index = true;
-   
-            pe_vec      = Rope::gen_flux_pe(static_cast<int>(x->ne[1]),
-                                            static_cast<int>(x->ne[0]),
-                                            flux_params.patch_size,
-                                            static_cast<int>(x->ne[3]),
-                                            static_cast<int>(context->ne[1]),
-                                            txt_arange_dims,
-                                            ref_latents,
-                                            increase_ref_index,
-                                            flux_params.ref_index_scale,
-                                            flux_params.theta,
-                                            circular_y_enabled,
-                                            circular_x_enabled,
-                                            flux_params.axes_dim);
+
+            // Cache PE across denoising steps — it only depends on image/text dimensions
+            // and circular padding flags, none of which change between steps.
+            int pe_h       = static_cast<int>(x->ne[1]);
+            int pe_w       = static_cast<int>(x->ne[0]);
+            int pe_ctx_len = static_cast<int>(context->ne[1]);
+            size_t pe_n_refs = ref_latents.size();
+            bool pe_changed = (pe_h != cached_pe_h || pe_w != cached_pe_w ||
+                               pe_ctx_len != cached_pe_ctx_len ||
+                               pe_n_refs != cached_pe_n_refs ||
+                               circular_x_enabled != cached_pe_circ_x ||
+                               circular_y_enabled != cached_pe_circ_y);
+            if (pe_changed) {
+                pe_vec      = Rope::gen_flux_pe(pe_h,
+                                                pe_w,
+                                                flux_params.patch_size,
+                                                static_cast<int>(x->ne[3]),
+                                                pe_ctx_len,
+                                                txt_arange_dims,
+                                                ref_latents,
+                                                increase_ref_index,
+                                                flux_params.ref_index_scale,
+                                                flux_params.theta,
+                                                circular_y_enabled,
+                                                circular_x_enabled,
+                                                flux_params.axes_dim);
+                cached_pe_h       = pe_h;
+                cached_pe_w       = pe_w;
+                cached_pe_ctx_len = pe_ctx_len;
+                cached_pe_n_refs  = pe_n_refs;
+                cached_pe_circ_x  = circular_x_enabled;
+                cached_pe_circ_y  = circular_y_enabled;
+            }
             int pos_len = static_cast<int>(pe_vec.size() / flux_params.axes_dim_sum / 2);
 
             auto pe = ggml_new_tensor_4d(compute_ctx, GGML_TYPE_F32, 2, 2, flux_params.axes_dim_sum / 2, pos_len);

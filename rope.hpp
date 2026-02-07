@@ -41,12 +41,16 @@ namespace Rope {
         return flat_vec;
     }
 
-    __STATIC_INLINE__ std::vector<std::vector<float>> rope(const std::vector<float>& pos,
-                                                           int dim,
-                                                           int theta,
-                                                           const std::vector<int>& axis_wrap_dims = {}) {
+    // Returns a flat vector of shape [pos_size, half_dim * 4] in row-major order.
+    // Each group of 4 floats is the 2×2 rotation matrix [cos, -sin, sin, cos].
+    __STATIC_INLINE__ std::vector<float> rope(const std::vector<float>& pos,
+                                              int dim,
+                                              int theta,
+                                              const std::vector<int>& axis_wrap_dims = {}) {
         assert(dim % 2 == 0);
-        int half_dim = dim / 2;
+        int half_dim    = dim / 2;
+        int out_cols    = half_dim * 4;
+        size_t pos_size = pos.size();
 
         std::vector<float> scale = linspace(0.f, (dim * 1.f - 2) / dim, half_dim);
 
@@ -55,10 +59,11 @@ namespace Rope {
             omega[i] = 1.0f / ::powf(1.f * theta, scale[i]);
         }
 
-        size_t pos_size = pos.size();
-        std::vector<std::vector<float>> out(pos_size, std::vector<float>(half_dim));
+        // Single flat allocation instead of pos_size × 2 inner vectors
+        std::vector<float> result(pos_size * out_cols);
         for (size_t i = 0; i < pos_size; ++i) {
-            for (size_t j = 0; j < half_dim; ++j) {
+            size_t row_base = i * out_cols;
+            for (int j = 0; j < half_dim; ++j) {
                 float angle = pos[i] * omega[j];
                 if (!axis_wrap_dims.empty()) {
                     size_t wrap_size = axis_wrap_dims.size();
@@ -76,17 +81,13 @@ namespace Rope {
                     }
                 }
 
-                out[i][j] = angle;
-            }
-        }
-
-        std::vector<std::vector<float>> result(pos_size, std::vector<float>(half_dim * 4));
-        for (int i = 0; i < pos_size; ++i) {
-            for (int j = 0; j < half_dim; ++j) {
-                result[i][4 * j]     = std::cos(out[i][j]);
-                result[i][4 * j + 1] = -std::sin(out[i][j]);
-                result[i][4 * j + 2] = std::sin(out[i][j]);
-                result[i][4 * j + 3] = std::cos(out[i][j]);
+                // Compute sin/cos once per angle instead of 4 trig calls
+                float s              = std::sin(angle);
+                float c              = std::cos(angle);
+                result[row_base + 4 * j]     = c;
+                result[row_base + 4 * j + 1] = -s;
+                result[row_base + 4 * j + 2] = s;
+                result[row_base + 4 * j + 3] = c;
             }
         }
 
@@ -173,34 +174,38 @@ namespace Rope {
         std::vector<std::vector<float>> trans_ids = transpose(ids);
         size_t pos_len                            = ids.size() / bs;
         size_t num_axes                           = axes_dim.size();
-        // for (int i = 0; i < pos_len; i++) {
-        //     std::cout << trans_ids[0][i] << " " << trans_ids[1][i] << " " << trans_ids[2][i] << std::endl;
-        // }
 
         int emb_dim = 0;
         for (int d : axes_dim)
             emb_dim += d / 2;
 
-        std::vector<std::vector<float>> emb(bs * pos_len, std::vector<float>(emb_dim * 2 * 2, 0.0));
+        int emb_cols = emb_dim * 2 * 2;
+
+        // Single flat allocation instead of (bs * pos_len) inner vectors
+        std::vector<float> emb(bs * pos_len * emb_cols, 0.0f);
         size_t offset = 0;
         for (size_t i = 0; i < num_axes; ++i) {
             std::vector<int> axis_wrap_dims;
             if (!wrap_dims.empty() && i < (int)wrap_dims.size()) {
                 axis_wrap_dims = wrap_dims[i];
             }
-            std::vector<std::vector<float>> rope_emb =
-                rope(trans_ids[i], axes_dim[i], theta, axis_wrap_dims);  // [bs*pos_len, axes_dim[i]/2 * 2 * 2]
+            // rope() now returns flat [bs*pos_len, rope_cols] in row-major order
+            std::vector<float> rope_emb =
+                rope(trans_ids[i], axes_dim[i], theta, axis_wrap_dims);
+            int rope_cols = axes_dim[i] / 2 * 4;
             for (int b = 0; b < bs; ++b) {
-                for (int j = 0; j < pos_len; ++j) {
-                    for (int k = 0; k < rope_emb[0].size(); ++k) {
-                        emb[b * pos_len + j][offset + k] = rope_emb[j][k];
+                for (size_t j = 0; j < pos_len; ++j) {
+                    size_t emb_row  = (b * pos_len + j) * emb_cols + offset;
+                    size_t rope_row = j * rope_cols;
+                    for (int k = 0; k < rope_cols; ++k) {
+                        emb[emb_row + k] = rope_emb[rope_row + k];
                     }
                 }
             }
-            offset += rope_emb[0].size();
+            offset += rope_cols;
         }
 
-        return flatten(emb);
+        return emb;  // already flat
     }
 
     __STATIC_INLINE__ std::vector<std::vector<float>> gen_refs_ids(int patch_size,
