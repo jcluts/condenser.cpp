@@ -32,14 +32,11 @@ struct SDCliParams {
     int output_begin_idx    = -1;
 
     bool verbose          = false;
-    bool canny_preprocess = false;
-    bool convert_name     = false;
 
     preview_t preview_method = PREVIEW_NONE;
     int preview_interval     = 1;
     std::string preview_path = "preview.png";
     int preview_fps          = 16;
-    bool taesd_preview       = false;
     bool preview_noisy       = false;
     bool color               = false;
 
@@ -71,14 +68,6 @@ struct SDCliParams {
         };
 
         options.bool_options = {
-            {"",
-             "--canny",
-             "apply canny preprocessor (edge detection)",
-             true, &canny_preprocess},
-            {"",
-             "--convert-name",
-             "convert tensor name (for convert mode)",
-             true, &convert_name},
             {"-v",
              "--verbose",
              "print extra info",
@@ -143,7 +132,7 @@ struct SDCliParams {
         options.manual_options = {
             {"-M",
              "--mode",
-             "run mode, one of [img_gen, vid_gen, upscale, convert], default: img_gen",
+             "run mode, one of [img_gen, upscale, convert], default: img_gen",
              on_mode_arg},
             {"",
              "--preview",
@@ -179,13 +168,10 @@ struct SDCliParams {
             << "  output_path: \"" << output_path << "\",\n"
             << "  verbose: " << (verbose ? "true" : "false") << ",\n"
             << "  color: " << (color ? "true" : "false") << ",\n"
-            << "  canny_preprocess: " << (canny_preprocess ? "true" : "false") << ",\n"
-            << "  convert_name: " << (convert_name ? "true" : "false") << ",\n"
             << "  preview_method: " << previews_str[preview_method] << ",\n"
             << "  preview_interval: " << preview_interval << ",\n"
             << "  preview_path: \"" << preview_path << "\",\n"
             << "  preview_fps: " << preview_fps << ",\n"
-            << "  taesd_preview: " << (taesd_preview ? "true" : "false") << ",\n"
             << "  preview_noisy: " << (preview_noisy ? "true" : "false") << "\n"
             << "}";
         return oss.str();
@@ -213,7 +199,7 @@ void parse_args(int argc, const char** argv, SDCliParams& cli_params, SDContextP
 
     if (!cli_params.process_and_check() ||
         !ctx_params.process_and_check(cli_params.mode) ||
-        !gen_params.process_and_check(cli_params.mode, ctx_params.lora_model_dir)) {
+        !gen_params.process_and_check(cli_params.mode)) {
         print_usage(argc, argv, options_vec);
         exit(1);
     }
@@ -258,7 +244,7 @@ std::string get_image_params(const SDCliParams& cli_params, const SDContextParam
         parameter_string += " " + std::string(sd_scheduler_name(gen_params.sample_params.scheduler));
     }
     parameter_string += ", ";
-    for (const auto& te : {ctx_params.clip_l_path, ctx_params.clip_g_path, ctx_params.t5xxl_path, ctx_params.llm_path, ctx_params.llm_vision_path}) {
+    for (const auto& te : {ctx_params.clip_l_path, ctx_params.t5xxl_path, ctx_params.llm_path, ctx_params.llm_vision_path}) {
         if (!te.empty()) {
             parameter_string += "TE: " + sd_basename(te) + ", ";
         }
@@ -479,7 +465,7 @@ int main(int argc, const char* argv[]) {
                                cli_params.output_path.c_str(),
                                ctx_params.wtype,
                                ctx_params.tensor_type_rules.c_str(),
-                               cli_params.convert_name);
+                               false);
         if (!success) {
             LOG_ERROR("convert '%s'/'%s' to '%s' failed",
                       ctx_params.model_path.c_str(),
@@ -497,33 +483,15 @@ int main(int argc, const char* argv[]) {
 
     bool vae_decode_only     = true;
     sd_image_t init_image    = {0, 0, 3, nullptr};
-    sd_image_t end_image     = {0, 0, 3, nullptr};
-    sd_image_t control_image = {0, 0, 3, nullptr};
-    sd_image_t mask_image    = {0, 0, 1, nullptr};
     std::vector<sd_image_t> ref_images;
-    std::vector<sd_image_t> pmid_images;
-    std::vector<sd_image_t> control_frames;
 
     auto release_all_resources = [&]() {
         free(init_image.data);
-        free(end_image.data);
-        free(control_image.data);
-        free(mask_image.data);
         for (auto image : ref_images) {
             free(image.data);
             image.data = nullptr;
         }
         ref_images.clear();
-        for (auto image : pmid_images) {
-            free(image.data);
-            image.data = nullptr;
-        }
-        pmid_images.clear();
-        for (auto image : control_frames) {
-            free(image.data);
-            image.data = nullptr;
-        }
-        control_frames.clear();
     };
 
     auto load_image_and_update_size = [&](const std::string& path,
@@ -554,13 +522,6 @@ int main(int argc, const char* argv[]) {
         }
     }
 
-    if (gen_params.end_image_path.size() > 0) {
-        vae_decode_only = false;
-        if (!load_image_and_update_size(gen_params.init_image_path, end_image)) {
-            return 1;
-        }
-    }
-
     if (gen_params.ref_image_paths.size() > 0) {
         vae_decode_only = false;
         for (auto& path : gen_params.ref_image_paths) {
@@ -572,33 +533,7 @@ int main(int argc, const char* argv[]) {
         }
     }
 
-    if (gen_params.mask_image_path.size() > 0) {
-        if (!load_sd_image_from_file(&mask_image,
-                                     gen_params.mask_image_path.c_str(),
-                                     gen_params.get_resolved_width(),
-                                     gen_params.get_resolved_height(),
-                                     1)) {
-            LOG_ERROR("load image from '%s' failed", gen_params.mask_image_path.c_str());
-            release_all_resources();
-            return 1;
-        }
-    } else {
-        mask_image.data = (uint8_t*)malloc(gen_params.get_resolved_width() * gen_params.get_resolved_height());
-        if (mask_image.data == nullptr) {
-            LOG_ERROR("malloc mask image failed");
-            release_all_resources();
-            return 1;
-        }
-        mask_image.width  = gen_params.get_resolved_width();
-        mask_image.height = gen_params.get_resolved_height();
-        memset(mask_image.data, 255, gen_params.get_resolved_width() * gen_params.get_resolved_height());
-    }
-
-    if (cli_params.mode == VID_GEN) {
-        vae_decode_only = false;
-    }
-
-    sd_ctx_params_t sd_ctx_params = ctx_params.to_sd_ctx_params_t(vae_decode_only, true, cli_params.taesd_preview);
+    sd_ctx_params_t sd_ctx_params = ctx_params.to_sd_ctx_params_t(vae_decode_only, true, false);
 
     sd_image_t* results = nullptr;
     int num_results     = 0;
@@ -627,48 +562,33 @@ int main(int argc, const char* argv[]) {
             gen_params.sample_params.sample_method = sd_get_default_sample_method(sd_ctx);
         }
 
-        if (gen_params.high_noise_sample_params.sample_method == SAMPLE_METHOD_COUNT) {
-            gen_params.high_noise_sample_params.sample_method = sd_get_default_sample_method(sd_ctx);
-        }
-
         if (gen_params.sample_params.scheduler == SCHEDULER_COUNT) {
             gen_params.sample_params.scheduler = sd_get_default_scheduler(sd_ctx, gen_params.sample_params.sample_method);
         }
 
         if (cli_params.mode == IMG_GEN) {
-            sd_img_gen_params_t img_gen_params = {
-                gen_params.lora_vec.data(),
-                static_cast<uint32_t>(gen_params.lora_vec.size()),
-                gen_params.prompt.c_str(),
-                gen_params.negative_prompt.c_str(),
-                gen_params.clip_skip,
-                init_image,
-                ref_images.data(),
-                (int)ref_images.size(),
-                gen_params.auto_resize_ref_image,
-                gen_params.increase_ref_index,
-                mask_image,
-                gen_params.get_resolved_width(),
-                gen_params.get_resolved_height(),
-                gen_params.sample_params,
-                gen_params.strength,
-                gen_params.seed,
-                gen_params.batch_count,
-                control_image,
-                gen_params.control_strength,
-                {
-                    pmid_images.data(),
-                    (int)pmid_images.size(),
-                    gen_params.pm_id_embed_path.c_str(),
-                    gen_params.pm_style_strength,
-                },  // pm_params
-                ctx_params.vae_tiling_params,
-                gen_params.cache_params,
-            };
+            sd_img_gen_params_t img_gen_params = {};
+            sd_img_gen_params_init(&img_gen_params);
+            img_gen_params.prompt                = gen_params.prompt.c_str();
+            img_gen_params.negative_prompt        = gen_params.negative_prompt.c_str();
+            img_gen_params.clip_skip              = gen_params.clip_skip;
+            img_gen_params.init_image             = init_image;
+            img_gen_params.ref_images             = ref_images.data();
+            img_gen_params.ref_images_count       = (int)ref_images.size();
+            img_gen_params.auto_resize_ref_image  = gen_params.auto_resize_ref_image;
+            img_gen_params.increase_ref_index     = gen_params.increase_ref_index;
+            img_gen_params.width                  = gen_params.get_resolved_width();
+            img_gen_params.height                 = gen_params.get_resolved_height();
+            img_gen_params.sample_params          = gen_params.sample_params;
+            img_gen_params.strength               = gen_params.strength;
+            img_gen_params.seed                   = gen_params.seed;
+            img_gen_params.batch_count            = gen_params.batch_count;
+            img_gen_params.vae_tiling_params      = ctx_params.vae_tiling_params;
+            img_gen_params.cache                  = gen_params.cache_params;
 
             results     = generate_image(sd_ctx, &img_gen_params);
             num_results = gen_params.batch_count;
-        } 
+        }
 
         if (results == nullptr) {
             LOG_ERROR("generate failed");

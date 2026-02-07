@@ -40,7 +40,7 @@ const char* modes_str[] = {
     "convert",
     "upscale",
 };
-#define SD_ALL_MODES_STR "img_gen, vid_gen, convert, upscale"
+#define SD_ALL_MODES_STR "img_gen, convert, upscale"
 
 enum SDMode {
     IMG_GEN,
@@ -430,31 +430,20 @@ struct SDContextParams {
     int n_threads = -1;
     std::string model_path;
     std::string clip_l_path;
-    std::string clip_g_path;
-    std::string clip_vision_path;
     std::string t5xxl_path;
     std::string llm_path;
     std::string llm_vision_path;
     std::string diffusion_model_path;
-    std::string high_noise_diffusion_model_path;
     std::string vae_path;
     std::string taesd_path;
     std::string esrgan_path;
-    std::string control_net_path;
-    std::string embedding_dir;
-    std::string photo_maker_path;
     sd_type_t wtype = SD_TYPE_COUNT;
     std::string tensor_type_rules;
-    std::string lora_model_dir = ".";
-
-    std::map<std::string, std::string> embedding_map;
-    std::vector<sd_embedding_t> embedding_vec;
 
     rng_type_t rng_type         = CUDA_RNG;
     rng_type_t sampler_rng_type = RNG_TYPE_COUNT;
     bool offload_params_to_cpu  = false;
     bool enable_mmap            = false;
-    bool control_net_cpu        = false;
     bool clip_on_cpu            = false;
     bool vae_on_cpu             = false;
     bool flash_attn             = false;
@@ -466,17 +455,9 @@ struct SDContextParams {
     bool circular_x = false;
     bool circular_y = false;
 
-    bool chroma_use_dit_mask = true;
-    bool chroma_use_t5_mask  = false;
-    int chroma_t5_mask_pad   = 1;
-
-    bool qwen_image_zero_cond_t = false;
-
-    prediction_t prediction           = PREDICTION_COUNT;
-    lora_apply_mode_t lora_apply_mode = LORA_APPLY_AUTO;
+    prediction_t prediction = PREDICTION_COUNT;
 
     sd_tiling_params_t vae_tiling_params = {false, 0, 0, 0.5f, 0.0f, 0.0f};
-    bool force_sdxl_vae_conv_scale       = false;
 
     float flow_shift = INFINITY;
 
@@ -490,13 +471,6 @@ struct SDContextParams {
             {"",
              "--clip_l",
              "path to the clip-l text encoder", &clip_l_path},
-            {"", "--clip_g",
-             "path to the clip-g text encoder",
-             &clip_g_path},
-            {"",
-             "--clip_vision",
-             "path to the clip-vision encoder",
-             &clip_vision_path},
             {"",
              "--t5xxl",
              "path to the t5xxl text encoder",
@@ -510,21 +484,9 @@ struct SDContextParams {
              "path to the llm vit",
              &llm_vision_path},
             {"",
-             "--qwen2vl",
-             "alias of --llm. Deprecated.",
-             &llm_path},
-            {"",
-             "--qwen2vl_vision",
-             "alias of --llm_vision. Deprecated.",
-             &llm_vision_path},
-            {"",
              "--diffusion-model",
              "path to the standalone diffusion model",
              &diffusion_model_path},
-            {"",
-             "--high-noise-diffusion-model",
-             "path to the standalone high noise diffusion model",
-             &high_noise_diffusion_model_path},
             {"",
              "--vae",
              "path to standalone vae model",
@@ -538,26 +500,9 @@ struct SDContextParams {
              "alias of --taesd",
              &taesd_path},
             {"",
-             "--control-net",
-             "path to control net model",
-             &control_net_path},
-            {"",
-             "--embd-dir",
-             "embeddings directory",
-             &embedding_dir},
-            {"",
-             "--lora-model-dir",
-             "lora model directory",
-             &lora_model_dir},
-
-            {"",
              "--tensor-type-rules",
              "weight type per tensor pattern (example: \"^vae\\.=f16,model\\.=q8_0\")",
              &tensor_type_rules},
-            {"",
-             "--photo-maker",
-             "path to PHOTOMAKER model",
-             &photo_maker_path},
             {"",
              "--upscale-model",
              "path to esrgan model.",
@@ -570,10 +515,6 @@ struct SDContextParams {
              "number of threads to use during computation (default: -1). "
              "If threads <= 0, then threads will be set to the number of CPU physical cores",
              &n_threads},
-            {"",
-             "--chroma-t5-mask-pad",
-             "t5 mask pad size of chroma",
-             &chroma_t5_mask_pad},
         };
 
         options.float_options = {
@@ -593,10 +534,6 @@ struct SDContextParams {
              "process vae in tiles to reduce memory usage",
              true, &vae_tiling_params.enabled},
             {"",
-             "--force-sdxl-vae-conv-scale",
-             "force use of conv scale on sdxl vae",
-             true, &force_sdxl_vae_conv_scale},
-            {"",
              "--offload-to-cpu",
              "place the weights in RAM to save VRAM, and automatically load them into VRAM when needed",
              true, &offload_params_to_cpu},
@@ -604,10 +541,6 @@ struct SDContextParams {
              "--mmap",
              "whether to memory-map model",
              true, &enable_mmap},
-            {"",
-             "--control-net-cpu",
-             "keep controlnet in cpu (for low vram)",
-             true, &control_net_cpu},
             {"",
              "--clip-on-cpu",
              "keep clip in cpu (for low vram)",
@@ -644,18 +577,6 @@ struct SDContextParams {
              "--circulary",
              "enable circular RoPE wrapping on y-axis (height) only",
              true, &circular_y},
-            {"",
-             "--chroma-disable-dit-mask",
-             "disable dit mask for chroma",
-             false, &chroma_use_dit_mask},
-            {"",
-             "--qwen-image-zero-cond-t",
-             "enable zero_cond_t for qwen image",
-             true, &qwen_image_zero_cond_t},
-            {"",
-             "--chroma-enable-t5-mask",
-             "enable t5 mask for chroma",
-             true, &chroma_use_t5_mask},
         };
 
         auto on_type_arg = [&](int argc, const char** argv, int index) {
@@ -792,37 +713,6 @@ struct SDContextParams {
         return options;
     }
 
-    void build_embedding_map() {
-        static const std::vector<std::string> valid_ext = {".gguf", ".safetensors", ".pt"};
-
-        if (!fs::exists(embedding_dir) || !fs::is_directory(embedding_dir)) {
-            return;
-        }
-
-        for (auto& p : fs::directory_iterator(embedding_dir)) {
-            if (!p.is_regular_file())
-                continue;
-
-            auto path       = p.path();
-            std::string ext = path.extension().string();
-
-            bool valid = false;
-            for (auto& e : valid_ext) {
-                if (ext == e) {
-                    valid = true;
-                    break;
-                }
-            }
-            if (!valid)
-                continue;
-
-            std::string key   = path.stem().string();
-            std::string value = path.string();
-
-            embedding_map[key] = value;
-        }
-    }
-
     bool process_and_check(SDMode mode) {
         if (mode != UPSCALE && model_path.length() == 0 && diffusion_model_path.length() == 0) {
             LOG_ERROR("error: the following arguments are required: model_path/diffusion_model\n");
@@ -840,52 +730,29 @@ struct SDContextParams {
             n_threads = sd_get_num_physical_cores();
         }
 
-        build_embedding_map();
-
         return true;
     }
 
     std::string to_string() const {
-        std::ostringstream emb_ss;
-        emb_ss << "{\n";
-        for (auto it = embedding_map.begin(); it != embedding_map.end(); ++it) {
-            emb_ss << "    \"" << it->first << "\": \"" << it->second << "\"";
-            if (std::next(it) != embedding_map.end()) {
-                emb_ss << ",";
-            }
-            emb_ss << "\n";
-        }
-        emb_ss << "  }";
-
-        std::string embeddings_str = emb_ss.str();
         std::ostringstream oss;
         oss << "SDContextParams {\n"
             << "  n_threads: " << n_threads << ",\n"
             << "  model_path: \"" << model_path << "\",\n"
             << "  clip_l_path: \"" << clip_l_path << "\",\n"
-            << "  clip_g_path: \"" << clip_g_path << "\",\n"
-            << "  clip_vision_path: \"" << clip_vision_path << "\",\n"
             << "  t5xxl_path: \"" << t5xxl_path << "\",\n"
             << "  llm_path: \"" << llm_path << "\",\n"
             << "  llm_vision_path: \"" << llm_vision_path << "\",\n"
             << "  diffusion_model_path: \"" << diffusion_model_path << "\",\n"
-            << "  high_noise_diffusion_model_path: \"" << high_noise_diffusion_model_path << "\",\n"
             << "  vae_path: \"" << vae_path << "\",\n"
             << "  taesd_path: \"" << taesd_path << "\",\n"
             << "  esrgan_path: \"" << esrgan_path << "\",\n"
-            << "  control_net_path: \"" << control_net_path << "\",\n"
-            << "  embedding_dir: \"" << embedding_dir << "\",\n"
-            << "  embeddings: " << embeddings_str << "\n"
             << "  wtype: " << sd_type_name(wtype) << ",\n"
             << "  tensor_type_rules: \"" << tensor_type_rules << "\",\n"
-            << "  lora_model_dir: \"" << lora_model_dir << "\",\n"
-            << "  photo_maker_path: \"" << photo_maker_path << "\",\n"
             << "  rng_type: " << sd_rng_type_name(rng_type) << ",\n"
             << "  sampler_rng_type: " << sd_rng_type_name(sampler_rng_type) << ",\n"
             << "  flow_shift: " << (std::isinf(flow_shift) ? "INF" : std::to_string(flow_shift)) << "\n"
             << "  offload_params_to_cpu: " << (offload_params_to_cpu ? "true" : "false") << ",\n"
             << "  enable_mmap: " << (enable_mmap ? "true" : "false") << ",\n"
-            << "  control_net_cpu: " << (control_net_cpu ? "true" : "false") << ",\n"
             << "  clip_on_cpu: " << (clip_on_cpu ? "true" : "false") << ",\n"
             << "  vae_on_cpu: " << (vae_on_cpu ? "true" : "false") << ",\n"
             << "  flash_attn: " << (flash_attn ? "true" : "false") << ",\n"
@@ -895,10 +762,6 @@ struct SDContextParams {
             << "  circular: " << (circular ? "true" : "false") << ",\n"
             << "  circular_x: " << (circular_x ? "true" : "false") << ",\n"
             << "  circular_y: " << (circular_y ? "true" : "false") << ",\n"
-            << "  chroma_use_dit_mask: " << (chroma_use_dit_mask ? "true" : "false") << ",\n"
-            << "  qwen_image_zero_cond_t: " << (qwen_image_zero_cond_t ? "true" : "false") << ",\n"
-            << "  chroma_use_t5_mask: " << (chroma_use_t5_mask ? "true" : "false") << ",\n"
-            << "  chroma_t5_mask_pad: " << chroma_t5_mask_pad << ",\n"
             << "  prediction: " << sd_prediction_name(prediction) << ",\n"
             << "  vae_tiling_params: { "
             << vae_tiling_params.enabled << ", "
@@ -906,66 +769,42 @@ struct SDContextParams {
             << vae_tiling_params.tile_size_y << ", "
             << vae_tiling_params.target_overlap << ", "
             << vae_tiling_params.rel_size_x << ", "
-            << vae_tiling_params.rel_size_y << " },\n"
-            << "  force_sdxl_vae_conv_scale: " << (force_sdxl_vae_conv_scale ? "true" : "false") << "\n"
+            << vae_tiling_params.rel_size_y << " }\n"
             << "}";
         return oss.str();
     }
 
     sd_ctx_params_t to_sd_ctx_params_t(bool vae_decode_only, bool free_params_immediately, bool taesd_preview) {
-        embedding_vec.clear();
-        embedding_vec.reserve(embedding_map.size());
-        for (const auto& kv : embedding_map) {
-            sd_embedding_t item;
-            item.name = kv.first.c_str();
-            item.path = kv.second.c_str();
-            embedding_vec.emplace_back(item);
-        }
-
-        sd_ctx_params_t sd_ctx_params = {
-            model_path.c_str(),
-            clip_l_path.c_str(),
-            clip_g_path.c_str(),
-            clip_vision_path.c_str(),
-            t5xxl_path.c_str(),
-            llm_path.c_str(),
-            llm_vision_path.c_str(),
-            diffusion_model_path.c_str(),
-            high_noise_diffusion_model_path.c_str(),
-            vae_path.c_str(),
-            taesd_path.c_str(),
-            control_net_path.c_str(),
-            embedding_vec.data(),
-            static_cast<uint32_t>(embedding_vec.size()),
-            photo_maker_path.c_str(),
-            tensor_type_rules.c_str(),
-            vae_decode_only,
-            free_params_immediately,
-            n_threads,
-            wtype,
-            rng_type,
-            sampler_rng_type,
-            prediction,
-            lora_apply_mode,
-            offload_params_to_cpu,
-            enable_mmap,
-            clip_on_cpu,
-            control_net_cpu,
-            vae_on_cpu,
-            flash_attn,
-            diffusion_flash_attn,
-            taesd_preview,
-            diffusion_conv_direct,
-            vae_conv_direct,
-            circular || circular_x,
-            circular || circular_y,
-            force_sdxl_vae_conv_scale,
-            chroma_use_dit_mask,
-            chroma_use_t5_mask,
-            chroma_t5_mask_pad,
-            qwen_image_zero_cond_t,
-            flow_shift,
-        };
+        sd_ctx_params_t sd_ctx_params;
+        sd_ctx_params_init(&sd_ctx_params);
+        sd_ctx_params.model_path              = model_path.c_str();
+        sd_ctx_params.clip_l_path             = clip_l_path.c_str();
+        sd_ctx_params.t5xxl_path              = t5xxl_path.c_str();
+        sd_ctx_params.llm_path                = llm_path.c_str();
+        sd_ctx_params.llm_vision_path         = llm_vision_path.c_str();
+        sd_ctx_params.diffusion_model_path    = diffusion_model_path.c_str();
+        sd_ctx_params.vae_path                = vae_path.c_str();
+        sd_ctx_params.taesd_path              = taesd_path.c_str();
+        sd_ctx_params.tensor_type_rules       = tensor_type_rules.c_str();
+        sd_ctx_params.vae_decode_only         = vae_decode_only;
+        sd_ctx_params.free_params_immediately = free_params_immediately;
+        sd_ctx_params.n_threads               = n_threads;
+        sd_ctx_params.wtype                   = wtype;
+        sd_ctx_params.rng_type                = rng_type;
+        sd_ctx_params.sampler_rng_type        = sampler_rng_type;
+        sd_ctx_params.prediction              = prediction;
+        sd_ctx_params.offload_params_to_cpu   = offload_params_to_cpu;
+        sd_ctx_params.enable_mmap             = enable_mmap;
+        sd_ctx_params.keep_clip_on_cpu        = clip_on_cpu;
+        sd_ctx_params.keep_vae_on_cpu         = vae_on_cpu;
+        sd_ctx_params.flash_attn              = flash_attn;
+        sd_ctx_params.diffusion_flash_attn    = diffusion_flash_attn;
+        sd_ctx_params.tae_preview_only        = taesd_preview;
+        sd_ctx_params.diffusion_conv_direct   = diffusion_conv_direct;
+        sd_ctx_params.vae_conv_direct         = vae_conv_direct;
+        sd_ctx_params.circular_x              = circular || circular_x;
+        sd_ctx_params.circular_y              = circular || circular_y;
+        sd_ctx_params.flow_shift              = flow_shift;
         return sd_ctx_params;
     }
 };
@@ -1013,19 +852,12 @@ struct SDGenerationParams {
     int height      = -1;
     int batch_count = 1;
     std::string init_image_path;
-    std::string end_image_path;
-    std::string mask_image_path;
-    std::string control_image_path;
     std::vector<std::string> ref_image_paths;
-    std::string control_video_path;
     bool auto_resize_ref_image = true;
     bool increase_ref_index    = false;
 
     std::vector<int> skip_layers = {7, 8, 9};
     sd_sample_params_t sample_params;
-
-    std::vector<int> high_noise_skip_layers = {7, 8, 9};
-    sd_sample_params_t high_noise_sample_params;
 
     std::vector<float> custom_sigmas;
 
@@ -1036,31 +868,17 @@ struct SDGenerationParams {
     bool scm_policy_dynamic = true;
     sd_cache_params_t cache_params{};
 
-    float moe_boundary  = 0.875f;
-    int video_frames    = 1;
-    int fps             = 16;
-    float vace_strength = 1.f;
+    int fps = 16;
 
-    float strength         = 0.75f;
-    float control_strength = 0.9f;
+    float strength = 0.75f;
 
     int64_t seed = 42;
-
-    // Photo Maker
-    std::string pm_id_images_dir;
-    std::string pm_id_embed_path;
-    float pm_style_strength = 20.f;
 
     int upscale_repeats   = 1;
     int upscale_tile_size = 128;
 
-    std::map<std::string, float> lora_map;
-    std::map<std::string, float> high_noise_lora_map;
-    std::vector<sd_lora_t> lora_vec;
-
     SDGenerationParams() {
         sd_sample_params_init(&sample_params);
-        sd_sample_params_init(&high_noise_sample_params);
     }
 
     ArgOptions get_options() {
@@ -1078,14 +896,6 @@ struct SDGenerationParams {
              "--init-img",
              "path to the init image",
              &init_image_path},
-            {"",
-             "--end-img",
-             "path to the end image, required by flf2v",
-             &end_image_path},
-            {"",
-             "--mask",
-             "path to the mask image",
-             &mask_image_path},
         };
 
         options.int_options = {
@@ -1102,10 +912,6 @@ struct SDGenerationParams {
              "number of sample steps (default: 20)",
              &sample_params.sample_steps},
             {"",
-             "--high-noise-steps",
-             "(high noise) number of sample steps (default: -1 = auto)",
-             &high_noise_sample_params.sample_steps},
-            {"",
              "--clip-skip",
              "ignore last layers of CLIP network; 1 ignores none, 2 ignores one layer (default: -1). "
              "<= 0 represents unspecified, will be 1 for SD1.x, 2 for SD2.x",
@@ -1115,12 +921,8 @@ struct SDGenerationParams {
              "batch count",
              &batch_count},
             {"",
-             "--video-frames",
-             "video frames (default: 1)",
-             &video_frames},
-            {"",
              "--fps",
-             "fps (default: 24)",
+             "fps (default: 16)",
              &fps},
             {"",
              "--timestep-shift",
@@ -1167,49 +969,9 @@ struct SDGenerationParams {
              "eta in DDIM, only for DDIM and TCD (default: 0)",
              &sample_params.eta},
             {"",
-             "--high-noise-cfg-scale",
-             "(high noise) unconditional guidance scale: (default: 7.0)",
-             &high_noise_sample_params.guidance.txt_cfg},
-            {"",
-             "--high-noise-img-cfg-scale",
-             "(high noise) image guidance scale for inpaint or instruct-pix2pix models (default: same as --cfg-scale)",
-             &high_noise_sample_params.guidance.img_cfg},
-            {"",
-             "--high-noise-guidance",
-             "(high noise) distilled guidance scale for models with guidance input (default: 3.5)",
-             &high_noise_sample_params.guidance.distilled_guidance},
-            {"",
-             "--high-noise-slg-scale",
-             "(high noise) skip layer guidance (SLG) scale, only for DiT models: (default: 0)",
-             &high_noise_sample_params.guidance.slg.scale},
-            {"",
-             "--high-noise-skip-layer-start",
-             "(high noise) SLG enabling point (default: 0.01)",
-             &high_noise_sample_params.guidance.slg.layer_start},
-            {"",
-             "--high-noise-skip-layer-end",
-             "(high noise) SLG disabling point (default: 0.2)",
-             &high_noise_sample_params.guidance.slg.layer_end},
-            {"",
-             "--high-noise-eta",
-             "(high noise) eta in DDIM, only for DDIM and TCD (default: 0)",
-             &high_noise_sample_params.eta},
-            {"",
              "--strength",
              "strength for noising/unnoising (default: 0.75)",
              &strength},
-            {"",
-             "--control-strength",
-             "strength to apply Control Net (default: 0.9). 1.0 corresponds to full destruction of information in init image",
-             &control_strength},
-            {"",
-             "--moe-boundary",
-             "timestep boundary for Wan2.2 MoE model. (default: 0.875). Only enabled if `--high-noise-steps` is set to -1",
-             &moe_boundary},
-            {"",
-             "--vace-strength",
-             "wan vace strength",
-             &vace_strength},
         };
 
         options.bool_options = {
@@ -1241,20 +1003,6 @@ struct SDGenerationParams {
             sample_params.sample_method = str_to_sample_method(arg);
             if (sample_params.sample_method == SAMPLE_METHOD_COUNT) {
                 LOG_ERROR("error: invalid sample method %s",
-                          arg);
-                return -1;
-            }
-            return 1;
-        };
-
-        auto on_high_noise_sample_method_arg = [&](int argc, const char** argv, int index) {
-            if (++index >= argc) {
-                return -1;
-            }
-            const char* arg                        = argv[index];
-            high_noise_sample_params.sample_method = str_to_sample_method(arg);
-            if (high_noise_sample_params.sample_method == SAMPLE_METHOD_COUNT) {
-                LOG_ERROR("error: invalid high noise sample method %s",
                           arg);
                 return -1;
             }
@@ -1299,33 +1047,6 @@ struct SDGenerationParams {
                 }
             }
             skip_layers = layers;
-            return 1;
-        };
-
-        auto on_high_noise_skip_layers_arg = [&](int argc, const char** argv, int index) {
-            if (++index >= argc) {
-                return -1;
-            }
-            std::string layers_str = argv[index];
-            if (layers_str[0] != '[' || layers_str[layers_str.size() - 1] != ']') {
-                return -1;
-            }
-
-            layers_str = layers_str.substr(1, layers_str.size() - 2);
-
-            std::regex regex("[, ]+");
-            std::sregex_token_iterator iter(layers_str.begin(), layers_str.end(), regex, -1);
-            std::sregex_token_iterator end;
-            std::vector<std::string> tokens(iter, end);
-            std::vector<int> layers;
-            for (const auto& token : tokens) {
-                try {
-                    layers.push_back(std::stoi(token));
-                } catch (const std::invalid_argument&) {
-                    return -1;
-                }
-            }
-            high_noise_skip_layers = layers;
             return 1;
         };
 
@@ -1445,11 +1166,6 @@ struct SDGenerationParams {
              "(default: euler for Flux/SD3/Wan, euler_a otherwise)",
              on_sample_method_arg},
             {"",
-             "--high-noise-sampling-method",
-             "(high noise) sampling method, one of [euler, euler_a, heun, dpm2, dpm++2s_a, dpm++2m, dpm++2mv2, ipndm, ipndm_v, lcm, ddim_trailing, tcd, res_multistep, res_2s]"
-             " default: euler for Flux/SD3/Wan, euler_a otherwise",
-             on_high_noise_sample_method_arg},
-            {"",
              "--scheduler",
              "denoiser sigma scheduler, one of [discrete, karras, exponential, ays, gits, smoothstep, sgm_uniform, simple, kl_optimal, lcm, bong_tangent], default: discrete",
              on_scheduler_arg},
@@ -1461,10 +1177,6 @@ struct SDGenerationParams {
              "--skip-layers",
              "layers to skip for SLG steps (default: [7,8,9])",
              on_skip_layers_arg},
-            {"",
-             "--high-noise-skip-layers",
-             "(high noise) layers to skip for SLG steps (default: [7,8,9])",
-             on_high_noise_skip_layers_arg},
             {"-r",
              "--ref-image",
              "reference image for Flux Kontext models (can be used multiple times)",
@@ -1540,13 +1252,11 @@ struct SDGenerationParams {
         load_if_exists("width", width);
         load_if_exists("height", height);
         load_if_exists("batch_count", batch_count);
-        load_if_exists("video_frames", video_frames);
         load_if_exists("fps", fps);
         load_if_exists("upscale_repeats", upscale_repeats);
         load_if_exists("seed", seed);
 
         load_if_exists("strength", strength);
-        load_if_exists("moe_boundary", moe_boundary);
 
         load_if_exists("auto_resize_ref_image", auto_resize_ref_image);
         load_if_exists("increase_ref_index", increase_ref_index);
@@ -1554,7 +1264,6 @@ struct SDGenerationParams {
         load_if_exists("skip_layers", skip_layers);
 
         load_if_exists("steps", sample_params.sample_steps);
-        load_if_exists("high_noise_steps", high_noise_sample_params.sample_steps);
         load_if_exists("cfg_scale", sample_params.guidance.txt_cfg);
         load_if_exists("img_cfg_scale", sample_params.guidance.img_cfg);
         load_if_exists("guidance", sample_params.guidance.distilled_guidance);
@@ -1568,7 +1277,6 @@ struct SDGenerationParams {
             }
         };
         load_sampler_if_exists("sample_method", sample_params.sample_method);
-        load_sampler_if_exists("high_noise_sample_method", high_noise_sample_params.sample_method);
 
         if (j.contains("scheduler") && j["scheduler"].is_string()) {
             enum scheduler_t tmp = str_to_scheduler(j["scheduler"].get<std::string>().c_str());
@@ -1578,90 +1286,6 @@ struct SDGenerationParams {
         }
 
         return true;
-    }
-
-    void extract_and_remove_lora(const std::string& lora_model_dir) {
-        if (lora_model_dir.empty()) {
-            return;
-        }
-        static const std::regex re(R"(<lora:([^:>]+):([^>]+)>)");
-        static const std::vector<std::string> valid_ext = {".gguf", ".safetensors", ".pt"};
-        std::smatch m;
-
-        std::string tmp = prompt;
-
-        while (std::regex_search(tmp, m, re)) {
-            std::string raw_path      = m[1].str();
-            const std::string raw_mul = m[2].str();
-
-            float mul = 0.f;
-            try {
-                mul = std::stof(raw_mul);
-            } catch (...) {
-                tmp    = m.suffix().str();
-                prompt = std::regex_replace(prompt, re, "", std::regex_constants::format_first_only);
-                continue;
-            }
-
-            bool is_high_noise              = false;
-            static const std::string prefix = "|high_noise|";
-            if (raw_path.rfind(prefix, 0) == 0) {
-                raw_path.erase(0, prefix.size());
-                is_high_noise = true;
-            }
-
-            fs::path final_path;
-            if (is_absolute_path(raw_path)) {
-                final_path = raw_path;
-            } else {
-                final_path = fs::path(lora_model_dir) / raw_path;
-            }
-            if (!fs::exists(final_path)) {
-                bool found = false;
-                for (const auto& ext : valid_ext) {
-                    fs::path try_path = final_path;
-                    try_path += ext;
-                    if (fs::exists(try_path)) {
-                        final_path = try_path;
-                        found      = true;
-                        break;
-                    }
-                }
-                if (!found) {
-                    LOG_WARN("can not found lora %s", final_path.lexically_normal().string().c_str());
-                    tmp    = m.suffix().str();
-                    prompt = std::regex_replace(prompt, re, "", std::regex_constants::format_first_only);
-                    continue;
-                }
-            }
-
-            const std::string key = final_path.lexically_normal().string();
-
-            if (is_high_noise)
-                high_noise_lora_map[key] += mul;
-            else
-                lora_map[key] += mul;
-
-            prompt = std::regex_replace(prompt, re, "", std::regex_constants::format_first_only);
-
-            tmp = m.suffix().str();
-        }
-
-        for (const auto& kv : lora_map) {
-            sd_lora_t item;
-            item.is_high_noise = false;
-            item.path          = kv.first.c_str();
-            item.multiplier    = kv.second;
-            lora_vec.emplace_back(item);
-        }
-
-        for (const auto& kv : high_noise_lora_map) {
-            sd_lora_t item;
-            item.is_high_noise = true;
-            item.path          = kv.first.c_str();
-            item.multiplier    = kv.second;
-            lora_vec.emplace_back(item);
-        }
     }
 
     bool width_and_height_are_set() const {
@@ -1680,16 +1304,12 @@ struct SDGenerationParams {
 
     int get_resolved_height() const { return (height > 0) ? height : 512; }
 
-    bool process_and_check(SDMode mode, const std::string& lora_model_dir) {
+    bool process_and_check(SDMode mode) {
         prompt_with_lora = prompt;
 
         if (sample_params.sample_steps <= 0) {
             LOG_ERROR("error: the sample_steps must be greater than 0\n");
             return false;
-        }
-
-        if (high_noise_sample_params.sample_steps <= 0) {
-            high_noise_sample_params.sample_steps = -1;
         }
 
         if (strength < 0.f || strength > 1.f) {
@@ -1803,20 +1423,10 @@ struct SDGenerationParams {
             cache_params.scm_policy_dynamic = scm_policy_dynamic;
         }
 
-        sample_params.guidance.slg.layers                 = skip_layers.data();
-        sample_params.guidance.slg.layer_count            = skip_layers.size();
-        sample_params.custom_sigmas                       = custom_sigmas.data();
-        sample_params.custom_sigmas_count                 = static_cast<int>(custom_sigmas.size());
-        high_noise_sample_params.guidance.slg.layers      = high_noise_skip_layers.data();
-        high_noise_sample_params.guidance.slg.layer_count = high_noise_skip_layers.size();
-
-        if (mode == VID_GEN && video_frames <= 0) {
-            return false;
-        }
-
-        if (mode == VID_GEN && fps <= 0) {
-            return false;
-        }
+        sample_params.guidance.slg.layers      = skip_layers.data();
+        sample_params.guidance.slg.layer_count  = skip_layers.size();
+        sample_params.custom_sigmas             = custom_sigmas.data();
+        sample_params.custom_sigmas_count       = static_cast<int>(custom_sigmas.size());
 
         if (sample_params.shifted_timestep < 0 || sample_params.shifted_timestep > 1000) {
             return false;
@@ -1842,44 +1452,14 @@ struct SDGenerationParams {
             seed = rand();
         }
 
-        extract_and_remove_lora(lora_model_dir);
-
         return true;
     }
 
     std::string to_string() const {
-        char* sample_params_str            = sd_sample_params_to_str(&sample_params);
-        char* high_noise_sample_params_str = sd_sample_params_to_str(&high_noise_sample_params);
-
-        std::ostringstream lora_ss;
-        lora_ss << "{\n";
-        for (auto it = lora_map.begin(); it != lora_map.end(); ++it) {
-            lora_ss << "    \"" << it->first << "\": \"" << it->second << "\"";
-            if (std::next(it) != lora_map.end()) {
-                lora_ss << ",";
-            }
-            lora_ss << "\n";
-        }
-        lora_ss << "  }";
-        std::string loras_str = lora_ss.str();
-
-        lora_ss = std::ostringstream();
-        ;
-        lora_ss << "{\n";
-        for (auto it = high_noise_lora_map.begin(); it != high_noise_lora_map.end(); ++it) {
-            lora_ss << "    \"" << it->first << "\": \"" << it->second << "\"";
-            if (std::next(it) != high_noise_lora_map.end()) {
-                lora_ss << ",";
-            }
-            lora_ss << "\n";
-        }
-        lora_ss << "  }";
-        std::string high_noise_loras_str = lora_ss.str();
+        char* sample_params_str = sd_sample_params_to_str(&sample_params);
 
         std::ostringstream oss;
         oss << "SDGenerationParams {\n"
-            << "  loras: \"" << loras_str << "\",\n"
-            << "  high_noise_loras: \"" << high_noise_loras_str << "\",\n"
             << "  prompt: \"" << prompt << "\",\n"
             << "  negative_prompt: \"" << negative_prompt << "\",\n"
             << "  clip_skip: " << clip_skip << ",\n"
@@ -1887,20 +1467,11 @@ struct SDGenerationParams {
             << "  height: " << height << ",\n"
             << "  batch_count: " << batch_count << ",\n"
             << "  init_image_path: \"" << init_image_path << "\",\n"
-            << "  end_image_path: \"" << end_image_path << "\",\n"
-            << "  mask_image_path: \"" << mask_image_path << "\",\n"
-            << "  control_image_path: \"" << control_image_path << "\",\n"
             << "  ref_image_paths: " << vec_str_to_string(ref_image_paths) << ",\n"
-            << "  control_video_path: \"" << control_video_path << "\",\n"
             << "  auto_resize_ref_image: " << (auto_resize_ref_image ? "true" : "false") << ",\n"
             << "  increase_ref_index: " << (increase_ref_index ? "true" : "false") << ",\n"
-            << "  pm_id_images_dir: \"" << pm_id_images_dir << "\",\n"
-            << "  pm_id_embed_path: \"" << pm_id_embed_path << "\",\n"
-            << "  pm_style_strength: " << pm_style_strength << ",\n"
             << "  skip_layers: " << vec_to_string(skip_layers) << ",\n"
             << "  sample_params: " << sample_params_str << ",\n"
-            << "  high_noise_skip_layers: " << vec_to_string(high_noise_skip_layers) << ",\n"
-            << "  high_noise_sample_params: " << high_noise_sample_params_str << ",\n"
             << "  custom_sigmas: " << vec_to_string(custom_sigmas) << ",\n"
             << "  cache_mode: \"" << cache_mode << "\",\n"
             << "  cache_option: \"" << cache_option << "\",\n"
@@ -1909,18 +1480,13 @@ struct SDGenerationParams {
             << " (threshold=" << cache_params.reuse_threshold
             << ", start=" << cache_params.start_percent
             << ", end=" << cache_params.end_percent << "),\n"
-            << "  moe_boundary: " << moe_boundary << ",\n"
-            << "  video_frames: " << video_frames << ",\n"
             << "  fps: " << fps << ",\n"
-            << "  vace_strength: " << vace_strength << ",\n"
             << "  strength: " << strength << ",\n"
-            << "  control_strength: " << control_strength << ",\n"
             << "  seed: " << seed << ",\n"
             << "  upscale_repeats: " << upscale_repeats << ",\n"
             << "  upscale_tile_size: " << upscale_tile_size << ",\n"
             << "}";
         free(sample_params_str);
-        free(high_noise_sample_params_str);
         return oss.str();
     }
 };
