@@ -1,0 +1,308 @@
+# sd-engine — Persistent Inference Engine
+
+`sd-engine` is a persistent inference process that reads JSON commands from stdin and writes JSON responses to stdout. Unlike the CLI (`sd-cli`), which loads and unloads the model for every invocation, `sd-engine` keeps the model resident in VRAM between generations — delivering **3-5× faster** repeat generations with the same model.
+
+## Quick Start
+
+```bash
+# Build (from repo root)
+mkdir build && cd build
+cmake .. -DSD_VULKAN=ON    # or -DSD_CUBLAS=ON for CUDA
+cmake --build . --config Release
+
+# Test with a ping
+echo '{"cmd":"ping","id":"1"}' | ./bin/sd-engine
+# → {"id":"1","type":"ok","data":{"status":"pong"}}
+```
+
+## Usage
+
+`sd-engine` is designed to be spawned as a child process. The parent writes JSON commands to the engine's stdin (one per line) and reads JSON responses from stdout (one per line). All human-readable log output goes to stderr.
+
+### Interactive Example
+
+```bash
+./bin/sd-engine
+# Then type commands, one JSON object per line:
+{"cmd":"ping","id":"1"}
+{"cmd":"load","id":"2","params":{"diffusion_model":"/path/to/model.gguf","vae":"/path/to/ae.safetensors","llm":"/path/to/qwen.gguf"}}
+{"cmd":"generate","id":"3","params":{"prompt":"a cat on a windowsill","width":1024,"height":1024,"seed":42,"steps":4,"output":"./output.png"}}
+{"cmd":"generate","id":"4","params":{"prompt":"a cat on a windowsill","width":1024,"height":1024,"seed":99,"steps":4,"output":"./output2.png"}}
+{"cmd":"quit","id":"5"}
+```
+
+The second `generate` command will be **much faster** because the model is already loaded.
+
+### Piping Commands from a File
+
+```bash
+cat commands.jsonl | ./bin/sd-engine 2>engine.log
+```
+
+## Protocol Reference
+
+Every message is a single JSON object terminated by `\n` (newline-delimited JSON / NDJSON).
+
+### Commands (Client → Engine)
+
+#### `ping` — Health Check
+
+```json
+{"cmd": "ping", "id": "1"}
+```
+
+Response:
+```json
+{"id": "1", "type": "ok", "data": {"status": "pong"}}
+```
+
+#### `load` — Load a Model
+
+Creates or replaces the inference context. Frees any previously loaded model first.
+
+```json
+{
+  "cmd": "load",
+  "id": "req-1",
+  "params": {
+    "diffusion_model": "/path/to/model.gguf",
+    "vae": "/path/to/ae.safetensors",
+    "llm": "/path/to/qwen.gguf",
+    "n_threads": 8,
+    "flash_attn": true,
+    "diffusion_flash_attn": false,
+    "diffusion_conv_direct": false,
+    "vae_conv_direct": false,
+    "offload_to_cpu": false,
+    "llm_on_cpu": false,
+    "vae_on_cpu": false,
+    "vae_decode_only": true,
+    "free_params_immediately": true,
+    "flow_shift": 1.0
+  }
+}
+```
+
+All `params` fields except model paths are optional with sensible defaults.
+
+Response:
+```json
+{"id": "req-1", "type": "ok", "data": {"status": "model_loaded", "model_info": "model.gguf", "load_time_ms": 8500}}
+```
+
+#### `generate` — Run Inference
+
+Generates images using the currently loaded model. Fails if no model is loaded.
+
+```json
+{
+  "cmd": "generate",
+  "id": "req-2",
+  "params": {
+    "prompt": "a cat sitting on a windowsill",
+    "width": 1024,
+    "height": 1024,
+    "seed": 42,
+    "steps": 4,
+    "sampling_method": "euler",
+    "scheduler": "simple",
+    "guidance": 3.5,
+    "batch_count": 1,
+    "output": "/path/to/output.png",
+    "ref_images": ["/path/to/ref1.png"],
+    "increase_ref_index": false,
+    "vae_tiling": {
+      "enabled": true,
+      "tile_size_x": 256,
+      "tile_size_y": 256,
+      "target_overlap": 0.5
+    },
+    "cache": {
+      "mode": "disabled"
+    }
+  }
+}
+```
+
+During generation, the engine emits streaming progress messages:
+
+```json
+{"id": "req-2", "type": "progress", "data": {"phase": "conditioning", "message": "Running text encoder..."}}
+{"id": "req-2", "type": "progress", "data": {"phase": "sampling", "step": 1, "total_steps": 4, "step_time_s": 1.2}}
+{"id": "req-2", "type": "progress", "data": {"phase": "sampling", "step": 2, "total_steps": 4, "step_time_s": 0.9}}
+{"id": "req-2", "type": "progress", "data": {"phase": "sampling", "step": 3, "total_steps": 4, "step_time_s": 0.9}}
+{"id": "req-2", "type": "progress", "data": {"phase": "sampling", "step": 4, "total_steps": 4, "step_time_s": 0.8}}
+{"id": "req-2", "type": "progress", "data": {"phase": "saving", "message": "Saving output..."}}
+```
+
+Final result:
+```json
+{"id": "req-2", "type": "result", "data": {"success": true, "output": "/path/to/output.png", "seed": 42, "total_time_ms": 4200, "images_saved": 1}}
+```
+
+#### `unload` — Free VRAM
+
+Releases the model and frees VRAM without shutting down the engine.
+
+```json
+{"cmd": "unload", "id": "req-3"}
+```
+
+Response:
+```json
+{"id": "req-3", "type": "ok", "data": {"status": "model_unloaded"}}
+```
+
+#### `status` — Query Engine State
+
+```json
+{"cmd": "status", "id": "req-4"}
+```
+
+Response (model loaded):
+```json
+{"id": "req-4", "type": "ok", "data": {"model_loaded": true, "model_info": "flux2-klein-Q5_K.gguf", "uptime_s": 342}}
+```
+
+Response (no model):
+```json
+{"id": "req-4", "type": "ok", "data": {"model_loaded": false}}
+```
+
+#### `quit` — Graceful Shutdown
+
+```json
+{"cmd": "quit", "id": "req-5"}
+```
+
+Response:
+```json
+{"id": "req-5", "type": "ok", "data": {"status": "quitting"}}
+```
+
+The engine also shuts down cleanly if stdin is closed (e.g., parent process exits).
+
+### Response Types
+
+| Type | Meaning |
+|------|---------|
+| `ok` | Command completed successfully |
+| `progress` | Streaming update during generation |
+| `result` | Generation completed with output files |
+| `error` | Command failed |
+
+### Error Response
+
+```json
+{"id": "req-2", "type": "error", "data": {"message": "No model loaded — send a 'load' command first", "code": "NO_MODEL"}}
+```
+
+Error codes: `PARSE_ERROR`, `UNKNOWN_CMD`, `NO_MODEL`, `CTX_CREATION_FAILED`, `REF_IMAGE_LOAD_FAILED`, `OUTPUT_DIR_FAILED`, `GENERATION_FAILED`, `NO_OUTPUT`.
+
+## Design Decisions
+
+- **NDJSON** — Standard newline-delimited JSON. Easy to parse, easy to pipe, easy to debug.
+- **Sequential processing** — One command at a time. No concurrency needed for a single-parent sidecar.
+- **Unbuffered stdout** — `setvbuf(stdout, NULL, _IONBF, 0)` ensures progress lines arrive immediately, which is critical on Windows where pipe buffering can cause long delays.
+- **Stderr for logs** — All `LOG_INFO`/`LOG_WARN`/`LOG_ERROR` output from the library goes to stderr via `sd_set_log_callback`. This keeps stdout exclusively for the JSON protocol.
+- **File-based image I/O** — Images are passed as file paths, not base64. Zero overhead for local use.
+
+## Performance
+
+| Workflow | sd-cli | sd-engine |
+|----------|--------|-----------|
+| First generation (cold start) | 12s | 12s |
+| Same model, new seed | 12s | **3-4s** |
+| Same model + prompt, new seed | 12s | **3-4s** |
+
+The speedup comes from keeping the model in VRAM. With `sd-cli`, every invocation loads ~4-8 GB of model weights from disk into VRAM. With `sd-engine`, this happens once and subsequent generations go straight to inference.
+
+## Integration Examples
+
+### Python
+
+```python
+import subprocess, json
+
+engine = subprocess.Popen(
+    ["./sd-engine"],
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    text=True, bufsize=1
+)
+
+def send(cmd):
+    engine.stdin.write(json.dumps(cmd) + "\n")
+    engine.stdin.flush()
+
+def read_until_done():
+    while True:
+        line = engine.stdout.readline().strip()
+        if not line: continue
+        msg = json.loads(line)
+        print(f"  [{msg['type']}] {msg.get('data', {})}")
+        if msg["type"] in ("ok", "result", "error"):
+            return msg
+
+# Ping
+send({"cmd": "ping", "id": "1"})
+read_until_done()
+
+# Load model
+send({"cmd": "load", "id": "2", "params": {"diffusion_model": "model.gguf"}})
+read_until_done()
+
+# Generate (fast — model already loaded)
+send({"cmd": "generate", "id": "3", "params": {
+    "prompt": "a sunset over mountains",
+    "width": 1024, "height": 1024,
+    "seed": 42, "steps": 4,
+    "output": "output.png"
+}})
+read_until_done()
+
+# Quit
+send({"cmd": "quit", "id": "4"})
+engine.wait()
+```
+
+### Node.js
+
+```javascript
+const { spawn } = require('child_process');
+const engine = spawn('./sd-engine', [], { stdio: ['pipe', 'pipe', 'pipe'] });
+
+let buffer = '';
+engine.stdout.on('data', (chunk) => {
+    buffer += chunk.toString();
+    let idx;
+    while ((idx = buffer.indexOf('\n')) !== -1) {
+        const line = buffer.slice(0, idx).trim();
+        buffer = buffer.slice(idx + 1);
+        if (line) {
+            const msg = JSON.parse(line);
+            console.log(`[${msg.type}]`, msg.data);
+        }
+    }
+});
+
+function send(cmd) {
+    engine.stdin.write(JSON.stringify(cmd) + '\n');
+}
+
+send({ cmd: 'ping', id: '1' });
+```
+
+## Build Options
+
+The engine is built by default when `SD_BUILD_EXAMPLES` is ON (the default). To disable:
+
+```bash
+cmake .. -DSD_BUILD_EXAMPLES=OFF
+```
+
+## Version
+
+```bash
+./sd-engine --version
+# sd-engine 0.1.0 (abc1234)
+```
