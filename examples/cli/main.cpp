@@ -207,23 +207,9 @@ void parse_args(int argc, const char** argv, SDCliParams& cli_params, SDContextP
 
 std::string get_image_params(const SDCliParams& cli_params, const SDContextParams& ctx_params, const SDGenerationParams& gen_params, int64_t seed) {
     std::string parameter_string = gen_params.prompt + "\n";
-    if (gen_params.negative_prompt.size() != 0) {
-        parameter_string += "Negative prompt: " + gen_params.negative_prompt + "\n";
-    }
     parameter_string += "Steps: " + std::to_string(gen_params.sample_params.sample_steps) + ", ";
     parameter_string += "CFG scale: " + std::to_string(gen_params.sample_params.guidance.txt_cfg) + ", ";
-    if (gen_params.sample_params.guidance.slg.scale != 0 && gen_params.skip_layers.size() != 0) {
-        parameter_string += "SLG scale: " + std::to_string(gen_params.sample_params.guidance.txt_cfg) + ", ";
-        parameter_string += "Skip layers: [";
-        for (const auto& layer : gen_params.skip_layers) {
-            parameter_string += std::to_string(layer) + ", ";
-        }
-        parameter_string += "], ";
-        parameter_string += "Skip layer start: " + std::to_string(gen_params.sample_params.guidance.slg.layer_start) + ", ";
-        parameter_string += "Skip layer end: " + std::to_string(gen_params.sample_params.guidance.slg.layer_end) + ", ";
-    }
     parameter_string += "Guidance: " + std::to_string(gen_params.sample_params.guidance.distilled_guidance) + ", ";
-    parameter_string += "Eta: " + std::to_string(gen_params.sample_params.eta) + ", ";
     parameter_string += "Seed: " + std::to_string(seed) + ", ";
     parameter_string += "Size: " + std::to_string(gen_params.get_resolved_width()) + "x" + std::to_string(gen_params.get_resolved_height()) + ", ";
     parameter_string += "Model: " + sd_basename(ctx_params.model_path) + ", ";
@@ -244,19 +230,14 @@ std::string get_image_params(const SDCliParams& cli_params, const SDContextParam
         parameter_string += " " + std::string(sd_scheduler_name(gen_params.sample_params.scheduler));
     }
     parameter_string += ", ";
-    for (const auto& te : {ctx_params.clip_l_path, ctx_params.t5xxl_path, ctx_params.llm_path, ctx_params.llm_vision_path}) {
-        if (!te.empty()) {
-            parameter_string += "TE: " + sd_basename(te) + ", ";
-        }
+    if (!ctx_params.llm_path.empty()) {
+        parameter_string += "LLM: " + sd_basename(ctx_params.llm_path) + ", ";
     }
     if (!ctx_params.diffusion_model_path.empty()) {
-        parameter_string += "Unet: " + sd_basename(ctx_params.diffusion_model_path) + ", ";
+        parameter_string += "Diffusion: " + sd_basename(ctx_params.diffusion_model_path) + ", ";
     }
     if (!ctx_params.vae_path.empty()) {
         parameter_string += "VAE: " + sd_basename(ctx_params.vae_path) + ", ";
-    }
-    if (gen_params.clip_skip != -1) {
-        parameter_string += "Clip skip: " + std::to_string(gen_params.clip_skip) + ", ";
     }
     parameter_string += "Version: stable-diffusion.cpp";
     return parameter_string;

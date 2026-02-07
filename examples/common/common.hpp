@@ -467,20 +467,9 @@ struct SDContextParams {
              "path to full model",
              &model_path},
             {"",
-             "--clip_l",
-             "path to the clip-l text encoder", &clip_l_path},
-            {"",
-             "--t5xxl",
-             "path to the t5xxl text encoder",
-             &t5xxl_path},
-            {"",
              "--llm",
-             "path to the llm text encoder.",
+             "path to the llm text encoder (e.g. Qwen3-4B for Klein)",
              &llm_path},
-            {"",
-             "--llm_vision",
-             "path to the llm vit",
-             &llm_vision_path},
             {"",
              "--diffusion-model",
              "path to the standalone diffusion model",
@@ -489,14 +478,6 @@ struct SDContextParams {
              "--vae",
              "path to standalone vae model",
              &vae_path},
-            {"",
-             "--taesd",
-             "path to taesd. Using Tiny AutoEncoder for fast decoding (low quality)",
-             &taesd_path},
-            {"",
-             "--tae",
-             "alias of --taesd",
-             &taesd_path},
             {"",
              "--tensor-type-rules",
              "weight type per tensor pattern (example: \"^vae\\.=f16,model\\.=q8_0\")",
@@ -563,18 +544,7 @@ struct SDContextParams {
              "--vae-conv-direct",
              "use ggml_conv2d_direct in the vae model",
              true, &vae_conv_direct},
-            {"",
-             "--circular",
-             "enable circular padding for convolutions",
-             true, &circular},
-            {"",
-             "--circularx",
-             "enable circular RoPE wrapping on x-axis (width) only",
-             true, &circular_x},
-            {"",
-             "--circulary",
-             "enable circular RoPE wrapping on y-axis (height) only",
-             true, &circular_y},
+
         };
 
         auto on_type_arg = [&](int argc, const char** argv, int index) {
@@ -736,13 +706,9 @@ struct SDContextParams {
         oss << "SDContextParams {\n"
             << "  n_threads: " << n_threads << ",\n"
             << "  model_path: \"" << model_path << "\",\n"
-            << "  clip_l_path: \"" << clip_l_path << "\",\n"
-            << "  t5xxl_path: \"" << t5xxl_path << "\",\n"
             << "  llm_path: \"" << llm_path << "\",\n"
-            << "  llm_vision_path: \"" << llm_vision_path << "\",\n"
             << "  diffusion_model_path: \"" << diffusion_model_path << "\",\n"
             << "  vae_path: \"" << vae_path << "\",\n"
-            << "  taesd_path: \"" << taesd_path << "\",\n"
             << "  esrgan_path: \"" << esrgan_path << "\",\n"
             << "  wtype: " << sd_type_name(wtype) << ",\n"
             << "  tensor_type_rules: \"" << tensor_type_rules << "\",\n"
@@ -757,9 +723,6 @@ struct SDContextParams {
             << "  diffusion_flash_attn: " << (diffusion_flash_attn ? "true" : "false") << ",\n"
             << "  diffusion_conv_direct: " << (diffusion_conv_direct ? "true" : "false") << ",\n"
             << "  vae_conv_direct: " << (vae_conv_direct ? "true" : "false") << ",\n"
-            << "  circular: " << (circular ? "true" : "false") << ",\n"
-            << "  circular_x: " << (circular_x ? "true" : "false") << ",\n"
-            << "  circular_y: " << (circular_y ? "true" : "false") << ",\n"
             << "  prediction: " << sd_prediction_name(prediction) << ",\n"
             << "  vae_tiling_params: { "
             << vae_tiling_params.enabled << ", "
@@ -885,13 +848,9 @@ struct SDGenerationParams {
              "--prompt",
              "the prompt to render",
              &prompt},
-            {"-n",
-             "--negative-prompt",
-             "the negative prompt (default: \"\")",
-             &negative_prompt},
             {"-i",
              "--init-img",
-             "path to the init image",
+             "path to the input image (for upscale mode)",
              &init_image_path},
         };
 
@@ -908,24 +867,10 @@ struct SDGenerationParams {
              "--steps",
              "number of sample steps (default: 20)",
              &sample_params.sample_steps},
-            {"",
-             "--clip-skip",
-             "ignore last layers of CLIP network; 1 ignores none, 2 ignores one layer (default: -1). "
-             "<= 0 represents unspecified, will be 1 for SD1.x, 2 for SD2.x",
-             &clip_skip},
             {"-b",
              "--batch-count",
              "batch count",
              &batch_count},
-            {"",
-             "--fps",
-             "fps (default: 16)",
-             &fps},
-            {"",
-             "--timestep-shift",
-             "shift timestep for NitroFusion models (default: 0). "
-             "recommended N for NitroSD-Realism around 250 and 500 for NitroSD-Vibrant",
-             &sample_params.shifted_timestep},
             {"",
              "--upscale-repeats",
              "Run the ESRGAN upscaler this many times (default: 1)",
@@ -942,29 +887,9 @@ struct SDGenerationParams {
              "unconditional guidance scale: (default: 7.0)",
              &sample_params.guidance.txt_cfg},
             {"",
-             "--img-cfg-scale",
-             "image guidance scale for inpaint or instruct-pix2pix models: (default: same as --cfg-scale)",
-             &sample_params.guidance.img_cfg},
-            {"",
              "--guidance",
              "distilled guidance scale for models with guidance input (default: 3.5)",
              &sample_params.guidance.distilled_guidance},
-            {"",
-             "--slg-scale",
-             "skip layer guidance (SLG) scale, only for DiT models: (default: 0). 0 means disabled, a value of 2.5 is nice for sd3.5 medium",
-             &sample_params.guidance.slg.scale},
-            {"",
-             "--skip-layer-start",
-             "SLG enabling point (default: 0.01)",
-             &sample_params.guidance.slg.layer_start},
-            {"",
-             "--skip-layer-end",
-             "SLG disabling point (default: 0.2)",
-             &sample_params.guidance.slg.layer_end},
-            {"",
-             "--eta",
-             "eta in DDIM, only for DDIM and TCD (default: 0)",
-             &sample_params.eta},
             {"",
              "--strength",
              "strength for noising/unnoising (default: 0.75)",
@@ -1017,33 +942,6 @@ struct SDGenerationParams {
                           arg);
                 return -1;
             }
-            return 1;
-        };
-
-        auto on_skip_layers_arg = [&](int argc, const char** argv, int index) {
-            if (++index >= argc) {
-                return -1;
-            }
-            std::string layers_str = argv[index];
-            if (layers_str[0] != '[' || layers_str[layers_str.size() - 1] != ']') {
-                return -1;
-            }
-
-            layers_str = layers_str.substr(1, layers_str.size() - 2);
-
-            std::regex regex("[, ]+");
-            std::sregex_token_iterator iter(layers_str.begin(), layers_str.end(), regex, -1);
-            std::sregex_token_iterator end;
-            std::vector<std::string> tokens(iter, end);
-            std::vector<int> layers;
-            for (const auto& token : tokens) {
-                try {
-                    layers.push_back(std::stoi(token));
-                } catch (const std::invalid_argument&) {
-                    return -1;
-                }
-            }
-            skip_layers = layers;
             return 1;
         };
 
@@ -1170,10 +1068,6 @@ struct SDGenerationParams {
              "--sigmas",
              "custom sigma values for the sampler, comma-separated (e.g., \"14.61,7.8,3.5,0.0\").",
              on_sigmas_arg},
-            {"",
-             "--skip-layers",
-             "layers to skip for SLG steps (default: [7,8,9])",
-             on_skip_layers_arg},
             {"-r",
              "--ref-image",
              "reference image for Flux Kontext models (can be used multiple times)",
@@ -1239,17 +1133,14 @@ struct SDGenerationParams {
         };
 
         load_if_exists("prompt", prompt);
-        load_if_exists("negative_prompt", negative_prompt);
         load_if_exists("cache_mode", cache_mode);
         load_if_exists("cache_option", cache_option);
         load_if_exists("cache_preset", cache_preset);
         load_if_exists("scm_mask", scm_mask);
 
-        load_if_exists("clip_skip", clip_skip);
         load_if_exists("width", width);
         load_if_exists("height", height);
         load_if_exists("batch_count", batch_count);
-        load_if_exists("fps", fps);
         load_if_exists("upscale_repeats", upscale_repeats);
         load_if_exists("seed", seed);
 
@@ -1258,11 +1149,8 @@ struct SDGenerationParams {
         load_if_exists("auto_resize_ref_image", auto_resize_ref_image);
         load_if_exists("increase_ref_index", increase_ref_index);
 
-        load_if_exists("skip_layers", skip_layers);
-
         load_if_exists("steps", sample_params.sample_steps);
         load_if_exists("cfg_scale", sample_params.guidance.txt_cfg);
-        load_if_exists("img_cfg_scale", sample_params.guidance.img_cfg);
         load_if_exists("guidance", sample_params.guidance.distilled_guidance);
 
         auto load_sampler_if_exists = [&](const char* key, enum sample_method_t& out) {
@@ -1456,8 +1344,6 @@ struct SDGenerationParams {
         std::ostringstream oss;
         oss << "SDGenerationParams {\n"
             << "  prompt: \"" << prompt << "\",\n"
-            << "  negative_prompt: \"" << negative_prompt << "\",\n"
-            << "  clip_skip: " << clip_skip << ",\n"
             << "  width: " << width << ",\n"
             << "  height: " << height << ",\n"
             << "  batch_count: " << batch_count << ",\n"
@@ -1465,7 +1351,6 @@ struct SDGenerationParams {
             << "  ref_image_paths: " << vec_str_to_string(ref_image_paths) << ",\n"
             << "  auto_resize_ref_image: " << (auto_resize_ref_image ? "true" : "false") << ",\n"
             << "  increase_ref_index: " << (increase_ref_index ? "true" : "false") << ",\n"
-            << "  skip_layers: " << vec_to_string(skip_layers) << ",\n"
             << "  sample_params: " << sample_params_str << ",\n"
             << "  custom_sigmas: " << vec_to_string(custom_sigmas) << ",\n"
             << "  cache_mode: \"" << cache_mode << "\",\n"
@@ -1475,7 +1360,6 @@ struct SDGenerationParams {
             << " (threshold=" << cache_params.reuse_threshold
             << ", start=" << cache_params.start_percent
             << ", end=" << cache_params.end_percent << "),\n"
-            << "  fps: " << fps << ",\n"
             << "  strength: " << strength << ",\n"
             << "  seed: " << seed << ",\n"
             << "  upscale_repeats: " << upscale_repeats << ",\n"
