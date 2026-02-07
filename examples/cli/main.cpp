@@ -208,7 +208,6 @@ void parse_args(int argc, const char** argv, SDCliParams& cli_params, SDContextP
 std::string get_image_params(const SDCliParams& cli_params, const SDContextParams& ctx_params, const SDGenerationParams& gen_params, int64_t seed) {
     std::string parameter_string = gen_params.prompt + "\n";
     parameter_string += "Steps: " + std::to_string(gen_params.sample_params.sample_steps) + ", ";
-    parameter_string += "CFG scale: " + std::to_string(gen_params.sample_params.guidance.txt_cfg) + ", ";
     parameter_string += "Guidance: " + std::to_string(gen_params.sample_params.guidance.distilled_guidance) + ", ";
     parameter_string += "Seed: " + std::to_string(seed) + ", ";
     parameter_string += "Size: " + std::to_string(gen_params.get_resolved_width()) + "x" + std::to_string(gen_params.get_resolved_height()) + ", ";
@@ -514,7 +513,7 @@ int main(int argc, const char* argv[]) {
         }
     }
 
-    sd_ctx_params_t sd_ctx_params = ctx_params.to_sd_ctx_params_t(vae_decode_only, true, false);
+    sd_ctx_params_t sd_ctx_params = ctx_params.to_sd_ctx_params_t(vae_decode_only, true);
 
     sd_image_t* results = nullptr;
     int num_results     = 0;
@@ -551,9 +550,6 @@ int main(int argc, const char* argv[]) {
             sd_img_gen_params_t img_gen_params = {};
             sd_img_gen_params_init(&img_gen_params);
             img_gen_params.prompt                = gen_params.prompt.c_str();
-            img_gen_params.negative_prompt        = gen_params.negative_prompt.c_str();
-            img_gen_params.clip_skip              = gen_params.clip_skip;
-            img_gen_params.init_image             = init_image;
             img_gen_params.ref_images             = ref_images.data();
             img_gen_params.ref_images_count       = (int)ref_images.size();
             img_gen_params.auto_resize_ref_image  = gen_params.auto_resize_ref_image;

@@ -15,7 +15,6 @@ struct SDCondition {
 
 struct ConditionerParams {
     std::string text;
-    int clip_skip                       = -1;
     int width                           = -1;
     int height                          = -1;
     int adm_in_channels                 = -1;

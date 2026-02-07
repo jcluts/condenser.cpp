@@ -490,22 +490,13 @@ public:
                         ggml_tensor* init_latent,
                         ggml_tensor* noise,
                         SDCondition cond,
-                        SDCondition uncond,
-                        SDCondition img_cond,
-                        sd_guidance_params_t guidance,
+                        float distilled_guidance,
                         float eta,
                         sample_method_t method,
                         const std::vector<float>& sigmas,
-                        int start_merge_step,
                         std::vector<ggml_tensor*> ref_latents = {},
                         bool increase_ref_index               = false,
                         const sd_cache_params_t* cache_params = nullptr) {
-        std::vector<int> skip_layers(guidance.slg.layers, guidance.slg.layers + guidance.slg.layer_count);
-
-        // Flux2 uses embedded guidance only — force CFG to 1.0
-        float cfg_scale     = 1.0f;
-        float img_cfg_scale = 1.0f;
-        float slg_scale     = guidance.slg.scale;
 
         EasyCacheState easycache_state;
         CacheDitConditionState cachedit_state;
@@ -605,20 +596,8 @@ public:
 
         struct ggml_tensor* noised_input = ggml_dup_tensor(work_ctx, x);
 
-        bool has_unconditioned = cfg_scale != 1.0 && uncond.c_crossattn != nullptr;
-        bool has_skiplayer     = slg_scale != 0.0 && skip_layers.size() > 0;
-
         // denoise wrapper
         struct ggml_tensor* out_cond   = ggml_dup_tensor(work_ctx, x);
-        struct ggml_tensor* out_uncond = nullptr;
-        struct ggml_tensor* out_skip   = nullptr;
-
-        if (has_unconditioned) {
-            out_uncond = ggml_dup_tensor(work_ctx, x);
-        }
-        if (has_skiplayer) {
-            out_skip = ggml_dup_tensor(work_ctx, x);
-        }
         struct ggml_tensor* denoised = ggml_dup_tensor(work_ctx, x);
 
         int64_t t0 = ggml_time_us();
@@ -749,7 +728,7 @@ public:
             timesteps_vec.assign(1, t);
 
             auto timesteps = vector_to_ggml_tensor(work_ctx, timesteps_vec);
-            std::vector<float> guidance_vec(1, guidance.distilled_guidance);
+            std::vector<float> guidance_vec(1, distilled_guidance);
             auto guidance_tensor = vector_to_ggml_tensor(work_ctx, guidance_vec);
 
             copy_ggml_tensor(noised_input, input);
@@ -762,15 +741,11 @@ public:
             diffusion_params.ref_latents        = ref_latents;
             diffusion_params.increase_ref_index = increase_ref_index;
 
-            const SDCondition* active_condition = nullptr;
+            const SDCondition* active_condition = &cond;
             struct ggml_tensor** active_output  = &out_cond;
-            if (start_merge_step == -1 || step <= start_merge_step) {
-                // cond
-                diffusion_params.context  = cond.c_crossattn;
-                diffusion_params.c_concat = cond.c_concat;
-                diffusion_params.y        = cond.c_vector;
-                active_condition          = &cond;
-            }
+            diffusion_params.context  = cond.c_crossattn;
+            diffusion_params.c_concat = cond.c_concat;
+            diffusion_params.y        = cond.c_vector;
 
             bool skip_model = cache_before_condition(active_condition, *active_output);
             if (!skip_model) {
@@ -783,69 +758,20 @@ public:
                 cache_after_condition(active_condition, *active_output);
             }
 
-            bool current_step_skipped = cache_step_is_skipped();
-
-            float* negative_data = nullptr;
-            if (has_unconditioned) {
-                current_step_skipped      = cache_step_is_skipped();
-                diffusion_params.context  = uncond.c_crossattn;
-                diffusion_params.c_concat = uncond.c_concat;
-                diffusion_params.y        = uncond.c_vector;
-                bool skip_uncond          = cache_before_condition(&uncond, out_uncond);
-                if (!skip_uncond) {
-                    if (!work_diffusion_model->compute(n_threads,
-                                                       diffusion_params,
-                                                       &out_uncond)) {
-                        LOG_ERROR("diffusion model compute failed");
-                        return nullptr;
-                    }
-                    cache_after_condition(&uncond, out_uncond);
-                }
-                negative_data = (float*)out_uncond->data;
-            }
-
-            int step_count         = static_cast<int>(sigmas.size());
-            bool is_skiplayer_step = has_skiplayer && step > (int)(guidance.slg.layer_start * step_count) && step < (int)(guidance.slg.layer_end * step_count);
-            float* skip_layer_data = has_skiplayer ? (float*)out_skip->data : nullptr;
-            if (is_skiplayer_step) {
-                LOG_DEBUG("Skipping layers at step %d\n", step);
-                if (!cache_step_is_skipped()) {
-                    // skip layer (same as conditioned)
-                    diffusion_params.context     = cond.c_crossattn;
-                    diffusion_params.c_concat    = cond.c_concat;
-                    diffusion_params.y           = cond.c_vector;
-                    diffusion_params.skip_layers = skip_layers;
-                    if (!work_diffusion_model->compute(n_threads,
-                                                       diffusion_params,
-                                                       &out_skip)) {
-                        LOG_ERROR("diffusion model compute failed");
-                        return nullptr;
-                    }
-                }
-                skip_layer_data = (float*)out_skip->data;
-            }
             float* vec_denoised  = (float*)denoised->data;
             float* vec_input     = (float*)input->data;
             float* positive_data = (float*)out_cond->data;
             int ne_elements      = (int)ggml_nelements(denoised);
 
             for (int i = 0; i < ne_elements; i++) {
-                float latent_result = positive_data[i];
-                if (has_unconditioned) {
-                    latent_result = negative_data[i] + cfg_scale * (positive_data[i] - negative_data[i]);
-                }
-                if (is_skiplayer_step) {
-                    latent_result = latent_result + (positive_data[i] - skip_layer_data[i]) * slg_scale;
-                }
                 // denoised = (v * c_out + input * c_skip)
-                vec_denoised[i] = latent_result * c_out + vec_input[i] * c_skip;
+                vec_denoised[i] = positive_data[i] * c_out + vec_input[i] * c_skip;
             }
 
             int64_t t1 = ggml_time_us();
             if (step > 0 || step == -(int)steps) {
                 int showstep = std::abs(step);
                 pretty_progress(showstep, (int)steps, (t1 - t0) / 1000000.f / showstep);
-                // LOG_INFO("step %d sampling completed taking %.2fs", step, (t1 - t0) * 1.0f / 1000000);
             }
             return denoised;
         };
@@ -1134,35 +1060,6 @@ public:
         return result;
     }
 
-    ggml_tensor* gaussian_latent_sample(ggml_context* work_ctx, ggml_tensor* moments) {
-        // ldm.modules.distributions.distributions.DiagonalGaussianDistribution.sample
-        ggml_tensor* latent       = ggml_new_tensor_4d(work_ctx, moments->type, moments->ne[0], moments->ne[1], moments->ne[2] / 2, moments->ne[3]);
-        struct ggml_tensor* noise = ggml_dup_tensor(work_ctx, latent);
-        ggml_ext_im_set_randn_f32(noise, rng);
-        {
-            float mean   = 0;
-            float logvar = 0;
-            float value  = 0;
-            float std_   = 0;
-            for (int i = 0; i < latent->ne[3]; i++) {
-                for (int j = 0; j < latent->ne[2]; j++) {
-                    for (int k = 0; k < latent->ne[1]; k++) {
-                        for (int l = 0; l < latent->ne[0]; l++) {
-                            mean   = ggml_ext_tensor_get_f32(moments, l, k, j, i);
-                            logvar = ggml_ext_tensor_get_f32(moments, l, k, j + (int)latent->ne[2], i);
-                            logvar = std::max(-30.0f, std::min(logvar, 20.0f));
-                            std_   = std::exp(0.5f * logvar);
-                            value  = mean + std_ * ggml_ext_tensor_get_f32(noise, l, k, j, i);
-                            // printf("%d %d %d %d -> %f\n", i, j, k, l, value);
-                            ggml_ext_tensor_set_f32(latent, value, l, k, j, i);
-                        }
-                    }
-                }
-            }
-        }
-        return latent;
-    }
-
     ggml_tensor* get_first_stage_encoding(ggml_context* work_ctx, ggml_tensor* vae_output) {
         ggml_tensor* latent;
 
@@ -1427,13 +1324,10 @@ char* sd_ctx_params_to_str(const sd_ctx_params_t* sd_ctx_params) {
 
     snprintf(buf + strlen(buf), 4096 - strlen(buf),
              "model_path: %s\n"
-             "clip_l_path: %s\n"
-             "t5xxl_path: %s\n"
              "llm_path: %s\n"
              "llm_vision_path: %s\n"
              "diffusion_model_path: %s\n"
              "vae_path: %s\n"
-             "taesd_path: %s\n"
              "tensor_type_rules: %s\n"
              "vae_decode_only: %s\n"
              "free_params_immediately: %s\n"
@@ -1450,13 +1344,10 @@ char* sd_ctx_params_to_str(const sd_ctx_params_t* sd_ctx_params) {
              "circular_x: %s\n"
              "circular_y: %s\n",
              SAFE_STR(sd_ctx_params->model_path),
-             SAFE_STR(sd_ctx_params->clip_l_path),
-             SAFE_STR(sd_ctx_params->t5xxl_path),
              SAFE_STR(sd_ctx_params->llm_path),
              SAFE_STR(sd_ctx_params->llm_vision_path),
              SAFE_STR(sd_ctx_params->diffusion_model_path),
              SAFE_STR(sd_ctx_params->vae_path),
-             SAFE_STR(sd_ctx_params->taesd_path),
              SAFE_STR(sd_ctx_params->tensor_type_rules),
              BOOL_STR(sd_ctx_params->vae_decode_only),
              BOOL_STR(sd_ctx_params->free_params_immediately),
@@ -1478,13 +1369,7 @@ char* sd_ctx_params_to_str(const sd_ctx_params_t* sd_ctx_params) {
 
 void sd_sample_params_init(sd_sample_params_t* sample_params) {
     *sample_params                             = {};
-    sample_params->guidance.txt_cfg            = 7.0f;
-    sample_params->guidance.img_cfg            = INFINITY;
     sample_params->guidance.distilled_guidance = 3.5f;
-    sample_params->guidance.slg.layer_count    = 0;
-    sample_params->guidance.slg.layer_start    = 0.01f;
-    sample_params->guidance.slg.layer_end      = 0.2f;
-    sample_params->guidance.slg.scale          = 0.f;
     sample_params->scheduler                   = SCHEDULER_COUNT;
     sample_params->sample_method               = SAMPLE_METHOD_COUNT;
     sample_params->sample_steps                = 20;
@@ -1499,32 +1384,16 @@ char* sd_sample_params_to_str(const sd_sample_params_t* sample_params) {
     buf[0] = '\0';
 
     snprintf(buf + strlen(buf), 4096 - strlen(buf),
-             "(txt_cfg: %.2f, "
-             "img_cfg: %.2f, "
-             "distilled_guidance: %.2f, "
-             "slg.layer_count: %zu, "
-             "slg.layer_start: %.2f, "
-             "slg.layer_end: %.2f, "
-             "slg.scale: %.2f, "
+             "(distilled_guidance: %.2f, "
              "scheduler: %s, "
              "sample_method: %s, "
              "sample_steps: %d, "
-             "eta: %.2f, "
-             "shifted_timestep: %d)",
-             sample_params->guidance.txt_cfg,
-             std::isfinite(sample_params->guidance.img_cfg)
-                 ? sample_params->guidance.img_cfg
-                 : sample_params->guidance.txt_cfg,
+             "eta: %.2f)",
              sample_params->guidance.distilled_guidance,
-             sample_params->guidance.slg.layer_count,
-             sample_params->guidance.slg.layer_start,
-             sample_params->guidance.slg.layer_end,
-             sample_params->guidance.slg.scale,
              sd_scheduler_name(sample_params->scheduler),
              sd_sample_method_name(sample_params->sample_method),
              sample_params->sample_steps,
-             sample_params->eta,
-             sample_params->shifted_timestep);
+             sample_params->eta);
 
     return buf;
 }
@@ -1532,7 +1401,6 @@ char* sd_sample_params_to_str(const sd_sample_params_t* sample_params) {
 void sd_img_gen_params_init(sd_img_gen_params_t* sd_img_gen_params) {
     *sd_img_gen_params = {};
     sd_sample_params_init(&sd_img_gen_params->sample_params);
-    sd_img_gen_params->clip_skip         = -1;
     sd_img_gen_params->ref_images_count  = 0;
     sd_img_gen_params->width             = 512;
     sd_img_gen_params->height            = 512;
@@ -1552,8 +1420,6 @@ char* sd_img_gen_params_to_str(const sd_img_gen_params_t* sd_img_gen_params) {
 
     snprintf(buf + strlen(buf), 4096 - strlen(buf),
              "prompt: %s\n"
-             "negative_prompt: %s\n"
-             "clip_skip: %d\n"
              "width: %d\n"
              "height: %d\n"
              "sample_params: %s\n"
@@ -1565,8 +1431,6 @@ char* sd_img_gen_params_to_str(const sd_img_gen_params_t* sd_img_gen_params) {
              "increase_ref_index: %s\n"
              "VAE tiling: %s\n",
              SAFE_STR(sd_img_gen_params->prompt),
-             SAFE_STR(sd_img_gen_params->negative_prompt),
-             sd_img_gen_params->clip_skip,
              sd_img_gen_params->width,
              sd_img_gen_params->height,
              SAFE_STR(sample_params_str),
@@ -1640,9 +1504,7 @@ sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
                                     struct ggml_context* work_ctx,
                                     ggml_tensor* init_latent,
                                     std::string prompt,
-                                    std::string negative_prompt,
-                                    int clip_skip,
-                                    sd_guidance_params_t guidance,
+                                    float distilled_guidance,
                                     float eta,
                                     int width,
                                     int height,
@@ -1662,22 +1524,16 @@ sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
         seed = rand();
     }
 
-    if (!std::isfinite(guidance.img_cfg)) {
-        guidance.img_cfg = guidance.txt_cfg;
-    }
-
     int sample_steps = static_cast<int>(sigmas.size() - 1);
 
     int64_t t0 = ggml_time_ms();
 
     ConditionerParams condition_params;
     condition_params.text            = prompt;
-    condition_params.clip_skip       = clip_skip;
     condition_params.width           = width;
     condition_params.height          = height;
     condition_params.ref_images      = ref_images;
     condition_params.adm_in_channels = static_cast<int>(sd_ctx->sd->diffusion_model->get_adm_in_channels());
-
 
     // Get learned condition
     condition_params.zero_out_masked = false;
@@ -1685,14 +1541,6 @@ sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
                                                                                            sd_ctx->sd->n_threads,
                                                                                            condition_params);
 
-    SDCondition uncond;
-    if (guidance.txt_cfg != 1.0) {
-        condition_params.text            = negative_prompt;
-        condition_params.zero_out_masked = false;
-        uncond                           = sd_ctx->sd->cond_stage_model->get_learned_condition(work_ctx,
-                                                                                               sd_ctx->sd->n_threads,
-                                                                                               condition_params);
-    }
     int64_t t1 = ggml_time_ms();
     LOG_INFO("get_learned_condition completed, taking %" PRId64 " ms", t1 - t0);
 
@@ -1706,7 +1554,6 @@ sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
     int W = width / sd_ctx->sd->get_vae_scale_factor();
     int H = height / sd_ctx->sd->get_vae_scale_factor();
 
-    SDCondition img_cond;
     for (int b = 0; b < batch_count; b++) {
         int64_t sampling_start = ggml_time_ms();
         int64_t cur_seed       = seed + b;
@@ -1718,21 +1565,16 @@ sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
         struct ggml_tensor* noise = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, W, H, C, 1);
         ggml_ext_im_set_randn_f32(noise, sd_ctx->sd->rng);
 
-        int start_merge_step = -1;
-
         struct ggml_tensor* x_0 = sd_ctx->sd->sample(work_ctx,
                                                      sd_ctx->sd->diffusion_model,
                                                      true,
                                                      x_t,
                                                      noise,
                                                      cond,
-                                                     uncond,
-                                                     img_cond,
-                                                     guidance,
+                                                     distilled_guidance,
                                                      eta,
                                                      sample_method,
                                                      sigmas,
-                                                     start_merge_step,
                                                      ref_latents,
                                                      increase_ref_index,
                                                      cache_params);
@@ -1873,12 +1715,10 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
     LOG_INFO("TXT2IMG");
     init_latent = sd_ctx->sd->generate_init_latent(work_ctx, width, height);
 
-    // Flux2 uses embedded guidance — force CFG to 1.0
-    sd_guidance_params_t guidance = sd_img_gen_params->sample_params.guidance;
-    guidance.txt_cfg = 1.0f;
-    guidance.img_cfg = 1.0f;
-    if (guidance.distilled_guidance == 3.5f) {
-        guidance.distilled_guidance = 1.0f;
+    // Flux2 uses embedded guidance (distilled) — extract and apply default if needed
+    float distilled_guidance = sd_img_gen_params->sample_params.guidance.distilled_guidance;
+    if (distilled_guidance == 3.5f) {
+        distilled_guidance = 1.0f;
     }
     std::vector<sd_image_t*> ref_images;
     for (int i = 0; i < sd_img_gen_params->ref_images_count; i++) {
@@ -1946,9 +1786,7 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
                                                         work_ctx,
                                                         init_latent,
                                                         SAFE_STR(sd_img_gen_params->prompt),
-                                                        SAFE_STR(sd_img_gen_params->negative_prompt),
-                                                        sd_img_gen_params->clip_skip,
-                                                        guidance,
+                                                        distilled_guidance,
                                                         sd_img_gen_params->sample_params.eta,
                                                         width,
                                                         height,

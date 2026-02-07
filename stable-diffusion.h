@@ -149,13 +149,10 @@ typedef struct {
 
 typedef struct {
     const char* model_path;
-    const char* clip_l_path;
-    const char* t5xxl_path;
     const char* llm_path;
     const char* llm_vision_path;
     const char* diffusion_model_path;
     const char* vae_path;
-    const char* taesd_path;
     const char* tensor_type_rules;
     bool vae_decode_only;
     bool free_params_immediately;
@@ -170,7 +167,6 @@ typedef struct {
     bool keep_vae_on_cpu;
     bool flash_attn;
     bool diffusion_flash_attn;
-    bool tae_preview_only;
     bool diffusion_conv_direct;
     bool vae_conv_direct;
     bool circular_x;
@@ -186,18 +182,7 @@ typedef struct {
 } sd_image_t;
 
 typedef struct {
-    int* layers;
-    size_t layer_count;
-    float layer_start;
-    float layer_end;
-    float scale;
-} sd_slg_params_t;
-
-typedef struct {
-    float txt_cfg;
-    float img_cfg;
     float distilled_guidance;
-    sd_slg_params_t slg;
 } sd_guidance_params_t;
 
 typedef struct {
@@ -206,7 +191,6 @@ typedef struct {
     enum sample_method_t sample_method;
     int sample_steps;
     float eta;
-    int shifted_timestep;
     float* custom_sigmas;
     int custom_sigmas_count;
 } sd_sample_params_t;
@@ -242,9 +226,6 @@ typedef struct {
 
 typedef struct {
     const char* prompt;
-    const char* negative_prompt;
-    int clip_skip;
-    sd_image_t init_image;
     sd_image_t* ref_images;
     int ref_images_count;
     bool auto_resize_ref_image;

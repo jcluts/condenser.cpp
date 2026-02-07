@@ -427,13 +427,10 @@ static bool parse_options(int argc, const char** argv, const std::vector<ArgOpti
 struct SDContextParams {
     int n_threads = -1;
     std::string model_path;
-    std::string clip_l_path;
-    std::string t5xxl_path;
     std::string llm_path;
     std::string llm_vision_path;
     std::string diffusion_model_path;
     std::string vae_path;
-    std::string taesd_path;
     std::string esrgan_path;
     sd_type_t wtype = SD_TYPE_COUNT;
     std::string tensor_type_rules;
@@ -735,17 +732,14 @@ struct SDContextParams {
         return oss.str();
     }
 
-    sd_ctx_params_t to_sd_ctx_params_t(bool vae_decode_only, bool free_params_immediately, bool taesd_preview) {
+    sd_ctx_params_t to_sd_ctx_params_t(bool vae_decode_only, bool free_params_immediately) {
         sd_ctx_params_t sd_ctx_params;
         sd_ctx_params_init(&sd_ctx_params);
         sd_ctx_params.model_path              = model_path.c_str();
-        sd_ctx_params.clip_l_path             = clip_l_path.c_str();
-        sd_ctx_params.t5xxl_path              = t5xxl_path.c_str();
         sd_ctx_params.llm_path                = llm_path.c_str();
         sd_ctx_params.llm_vision_path         = llm_vision_path.c_str();
         sd_ctx_params.diffusion_model_path    = diffusion_model_path.c_str();
         sd_ctx_params.vae_path                = vae_path.c_str();
-        sd_ctx_params.taesd_path              = taesd_path.c_str();
         sd_ctx_params.tensor_type_rules       = tensor_type_rules.c_str();
         sd_ctx_params.vae_decode_only         = vae_decode_only;
         sd_ctx_params.free_params_immediately = free_params_immediately;
@@ -760,7 +754,6 @@ struct SDContextParams {
         sd_ctx_params.keep_vae_on_cpu         = vae_on_cpu;
         sd_ctx_params.flash_attn              = flash_attn;
         sd_ctx_params.diffusion_flash_attn    = diffusion_flash_attn;
-        sd_ctx_params.tae_preview_only        = taesd_preview;
         sd_ctx_params.diffusion_conv_direct   = diffusion_conv_direct;
         sd_ctx_params.vae_conv_direct         = vae_conv_direct;
         sd_ctx_params.circular_x              = circular || circular_x;
@@ -806,8 +799,6 @@ static bool is_absolute_path(const std::string& p) {
 
 struct SDGenerationParams {
     std::string prompt;
-    std::string negative_prompt;
-    int clip_skip   = -1;  // <= 0 represents unspecified
     int width       = -1;
     int height      = -1;
     int batch_count = 1;
@@ -816,7 +807,6 @@ struct SDGenerationParams {
     bool auto_resize_ref_image = true;
     bool increase_ref_index    = false;
 
-    std::vector<int> skip_layers = {7, 8, 9};
     sd_sample_params_t sample_params;
 
     std::vector<float> custom_sigmas;
@@ -880,10 +870,6 @@ struct SDGenerationParams {
         };
 
         options.float_options = {
-            {"",
-             "--cfg-scale",
-             "unconditional guidance scale: (default: 7.0)",
-             &sample_params.guidance.txt_cfg},
             {"",
              "--guidance",
              "distilled guidance scale for models with guidance input (default: 3.5)",
@@ -1142,7 +1128,6 @@ struct SDGenerationParams {
         load_if_exists("increase_ref_index", increase_ref_index);
 
         load_if_exists("steps", sample_params.sample_steps);
-        load_if_exists("cfg_scale", sample_params.guidance.txt_cfg);
         load_if_exists("guidance", sample_params.guidance.distilled_guidance);
 
         auto load_sampler_if_exists = [&](const char* key, enum sample_method_t& out) {
@@ -1293,14 +1278,8 @@ struct SDGenerationParams {
             cache_params.scm_policy_dynamic = scm_policy_dynamic;
         }
 
-        sample_params.guidance.slg.layers      = skip_layers.data();
-        sample_params.guidance.slg.layer_count  = skip_layers.size();
         sample_params.custom_sigmas             = custom_sigmas.data();
         sample_params.custom_sigmas_count       = static_cast<int>(custom_sigmas.size());
-
-        if (sample_params.shifted_timestep < 0 || sample_params.shifted_timestep > 1000) {
-            return false;
-        }
 
         if (upscale_repeats < 1) {
             return false;
