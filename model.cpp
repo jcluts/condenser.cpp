@@ -74,38 +74,12 @@ uint16_t read_short(uint8_t* buffer) {
 
 /*================================================= Preprocess ==================================================*/
 
+// Tensors that should be skipped during model loading (training-only or unused weights)
 const char* unused_tensors[] = {
-    "betas",
-    "alphas_cumprod_prev",
-    "sqrt_alphas_cumprod",
-    "sqrt_one_minus_alphas_cumprod",
-    "log_one_minus_alphas_cumprod",
-    "sqrt_recip_alphas_cumprod",
-    "sqrt_recipm1_alphas_cumprod",
-    "posterior_variance",
-    "posterior_log_variance_clipped",
-    "posterior_mean_coef1",
-    "posterior_mean_coef2",
-    "cond_stage_model.transformer.text_model.embeddings.position_ids",
-    "cond_stage_model.1.model.text_model.embeddings.position_ids",
-    "cond_stage_model.transformer.vision_model.embeddings.position_ids",
-    "cond_stage_model.model.logit_scale",
-    "conditioner.embedders.0.transformer.text_model.embeddings.position_ids",
-    "conditioner.embedders.0.model.logit_scale",
-    "conditioner.embedders.1.model.logit_scale",
-    "model.diffusion_model.time_embedding.cond_proj.weight",
-    "unet.time_embedding.cond_proj.weight",
+    "denoiser.sigmas",
     "model_ema.decay",
     "model_ema.num_updates",
     "model_ema.diffusion_model",
-    "embedding_manager",
-    "denoiser.sigmas",
-    "text_encoders.t5xxl.transformer.encoder.embed_tokens.weight",  // only used during training
-    "ztsnr",                                                        // Found in some SDXL vpred models
-    "edm_vpred.sigma_min",                                          // Found in CosXL
-    // TODO: find another way to avoid the "unknown tensor" for these two
-    // "edm_vpred.sigma_max", // Used to detect CosXL
-    // "v_pred", // Used to detect SDXL vpred models
     "text_encoders.llm.output.weight",
     "text_encoders.llm.lm_head.",
 };
@@ -286,15 +260,6 @@ void ModelLoader::add_tensor_storage(const TensorStorage& tensor_storage) {
     tensor_storage_map[tensor_storage.name] = tensor_storage;
 }
 
-bool is_zip_file(const std::string& file_path) {
-    struct zip_t* zip = zip_open(file_path.c_str(), 0, 'r');
-    if (zip == nullptr) {
-        return false;
-    }
-    zip_close(zip);
-    return true;
-}
-
 bool is_gguf_file(const std::string& file_path) {
     std::ifstream file(file_path, std::ios::binary);
     if (!file.is_open()) {
@@ -359,21 +324,15 @@ bool is_safetensors_file(const std::string& file_path) {
 }
 
 bool ModelLoader::init_from_file(const std::string& file_path, const std::string& prefix) {
-    if (is_directory(file_path)) {
-        LOG_INFO("load %s using diffusers format", file_path.c_str());
-        return init_from_diffusers_file(file_path, prefix);
-    } else if (is_gguf_file(file_path)) {
+    if (is_gguf_file(file_path)) {
         LOG_INFO("load %s using gguf format", file_path.c_str());
         return init_from_gguf_file(file_path, prefix);
     } else if (is_safetensors_file(file_path)) {
         LOG_INFO("load %s using safetensors format", file_path.c_str());
         return init_from_safetensors_file(file_path, prefix);
-    } else if (is_zip_file(file_path)) {
-        LOG_INFO("load %s using checkpoint format", file_path.c_str());
-        return init_from_ckpt_file(file_path, prefix);
     } else {
         if (file_exists(file_path)) {
-            LOG_WARN("unknown format %s", file_path.c_str());
+            LOG_WARN("unsupported format: %s (only .gguf and .safetensors supported)", file_path.c_str());
         } else {
             LOG_WARN("file %s not found", file_path.c_str());
         }
@@ -639,393 +598,6 @@ bool ModelLoader::init_from_safetensors_file(const std::string& file_path, const
     return true;
 }
 
-/*================================================= DiffusersModelLoader ==================================================*/
-
-bool ModelLoader::init_from_diffusers_file(const std::string& file_path, const std::string& prefix) {
-    std::string unet_path   = path_join(file_path, "unet/diffusion_pytorch_model.safetensors");
-    std::string vae_path    = path_join(file_path, "vae/diffusion_pytorch_model.safetensors");
-    std::string clip_path   = path_join(file_path, "text_encoder/model.safetensors");
-    std::string clip_g_path = path_join(file_path, "text_encoder_2/model.safetensors");
-
-    if (!init_from_safetensors_file(unet_path, "unet.")) {
-        return false;
-    }
-
-    if (!init_from_safetensors_file(vae_path, "vae.")) {
-        LOG_WARN("Couldn't find working VAE in %s", file_path.c_str());
-        // return false;
-    }
-    if (!init_from_safetensors_file(clip_path, "te.")) {
-        LOG_WARN("Couldn't find working text encoder in %s", file_path.c_str());
-        // return false;
-    }
-    if (!init_from_safetensors_file(clip_g_path, "te.1.")) {
-        LOG_DEBUG("Couldn't find working second text encoder in %s", file_path.c_str());
-    }
-    return true;
-}
-
-/*================================================= CkptModelLoader ==================================================*/
-
-// $ python -m pickletools sd-v1-4/archive/data.pkl | head -n 100
-//     0: \x80 PROTO      2
-//     2: }    EMPTY_DICT
-//     3: q    BINPUT     0
-//     5: (    MARK
-//     6: X        BINUNICODE 'epoch'
-//    16: q        BINPUT     1
-//    18: K        BININT1    6
-//    20: X        BINUNICODE 'global_step'
-//    36: q        BINPUT     2
-//    38: J        BININT     470000
-//    43: X        BINUNICODE 'pytorch-lightning_version'
-//    73: q        BINPUT     3
-//    75: X        BINUNICODE '1.4.2'
-//    85: q        BINPUT     4
-//    87: X        BINUNICODE 'state_dict'
-//   102: q        BINPUT     5
-//   104: }        EMPTY_DICT
-//   105: q        BINPUT     6
-//   107: (        MARK
-//   108: X            BINUNICODE 'betas'
-//   118: q            BINPUT     7
-//   120: c            GLOBAL     'torch._utils _rebuild_tensor_v2'
-//   153: q            BINPUT     8
-//   155: (            MARK
-//   156: (                MARK
-//   157: X                    BINUNICODE 'storage'
-//   169: q                    BINPUT     9
-//   171: c                    GLOBAL     'torch FloatStorage'
-//   191: q                    BINPUT     10
-//   193: X                    BINUNICODE '0'
-//   199: q                    BINPUT     11
-//   201: X                    BINUNICODE 'cpu'
-//   209: q                    BINPUT     12
-//   211: M                    BININT2    1000
-//   214: t                    TUPLE      (MARK at 156)
-//   215: q                BINPUT     13
-//   217: Q                BINPERSID
-//   218: K                BININT1    0
-//   220: M                BININT2    1000
-//  ...............................
-//  3201: q            BINPUT     250
-//  3203: R            REDUCE
-//  3204: q            BINPUT     251
-//  3206: X            BINUNICODE 'model.diffusion_model.input_blocks.1.1.proj_in.weight'
-//  3264: q            BINPUT     252
-//  3266: h            BINGET     8
-//  3268: (            MARK
-//  3269: (                MARK
-//  3270: h                    BINGET     9
-//  3272: h                    BINGET     10
-//  3274: X                    BINUNICODE '30'
-//  3281: q                    BINPUT     253
-//  3283: h                    BINGET     12
-//  3285: J                    BININT     102400
-//  3290: t                    TUPLE      (MARK at 3269)
-//  3291: q                BINPUT     254
-//  3293: Q                BINPERSID
-//  3294: K                BININT1    0
-//  3296: (                MARK
-//  3297: M                    BININT2    320
-//  3300: M                    BININT2    320
-//  3303: K                    BININT1    1
-//  3305: K                    BININT1    1
-//  3307: t                    TUPLE      (MARK at 3296)
-//  3308: q                BINPUT     255
-//  3310: (                MARK
-//  3311: M                    BININT2    320
-//  3314: K                    BININT1    1
-//  3316: K                    BININT1    1
-//  3318: K                    BININT1    1
-//  3320: t                    TUPLE      (MARK at 3310)
-//  3321: r                LONG_BINPUT 256
-//  3326: \x89             NEWFALSE
-//  3327: h                BINGET     16
-//  3329: )                EMPTY_TUPLE
-//  3330: R                REDUCE
-//  3331: r                LONG_BINPUT 257
-//  3336: t                TUPLE      (MARK at 3268)
-//  3337: r            LONG_BINPUT 258
-//  3342: R            REDUCE
-//  3343: r            LONG_BINPUT 259
-//  3348: X            BINUNICODE 'model.diffusion_model.input_blocks.1.1.proj_in.bias'
-//  3404: r            LONG_BINPUT 260
-//  3409: h            BINGET     8
-//  3411: (            MARK
-//  3412: (                MARK
-//  3413: h                    BINGET     9
-//  3415: h                    BINGET     10
-//  3417: X                    BINUNICODE '31'
-
-struct PickleTensorReader {
-    enum ReadPhase {
-        READ_NAME,
-        READ_DATA,
-        CHECK_SIZE,
-        READ_DIMENS
-    };
-    ReadPhase phase   = READ_NAME;
-    size_t entry_size = 0;
-    int32_t nelements = 0;
-
-    TensorStorage tensor_storage;
-
-    static ggml_type global_type;  // all pickle_tensors data type
-    static bool read_global_type;
-
-    bool read_int_value(uint32_t value) {
-        if (phase == CHECK_SIZE) {
-            if (entry_size == value * ggml_type_size(tensor_storage.type)) {
-                nelements = value;
-                phase     = READ_DIMENS;
-                return true;
-            } else {
-                phase = READ_NAME;
-            }
-        } else if (phase == READ_DIMENS) {
-            if (tensor_storage.n_dims + 1 > SD_MAX_DIMS) {  // too many dimens
-                phase                 = READ_NAME;
-                tensor_storage.n_dims = 0;
-            }
-            if (nelements % value == 0) {
-                tensor_storage.ne[tensor_storage.n_dims] = value;
-                tensor_storage.n_dims++;
-            }
-        }
-        return false;
-    }
-
-    void read_global(const std::string& str) {
-        if (str == "FloatStorage") {
-            if (read_global_type) {
-                global_type      = GGML_TYPE_F32;
-                read_global_type = false;
-            }
-            tensor_storage.type = GGML_TYPE_F32;
-        } else if (str == "HalfStorage") {
-            if (read_global_type) {
-                global_type      = GGML_TYPE_F16;
-                read_global_type = false;
-            }
-            tensor_storage.type = GGML_TYPE_F16;
-        }
-    }
-
-    void read_string(const std::string& str, struct zip_t* zip, std::string dir) {
-        if (str == "storage") {
-            read_global_type = true;
-        } else if (str != "state_dict") {
-            if (phase == READ_DATA) {
-                std::string entry_name = dir + "data/" + std::string(str);
-
-                size_t i, n = zip_entries_total(zip);
-                for (i = 0; i < n; ++i) {
-                    zip_entry_openbyindex(zip, i);
-                    {
-                        std::string name = zip_entry_name(zip);
-                        if (name == entry_name) {
-                            tensor_storage.index_in_zip = (int)i;
-                            entry_size                  = zip_entry_size(zip);
-                            zip_entry_close(zip);
-                            break;
-                        }
-                    }
-                    zip_entry_close(zip);
-                }
-
-                phase = entry_size > 0 ? CHECK_SIZE : READ_NAME;
-            }
-            if (!read_global_type && phase == READ_NAME) {
-                tensor_storage.name = str;
-                phase               = READ_DATA;
-                tensor_storage.type = global_type;
-            }
-        }
-    }
-};
-
-ggml_type PickleTensorReader::global_type = GGML_TYPE_F32;  // all pickle_tensors data type
-bool PickleTensorReader::read_global_type = false;
-
-int find_char(uint8_t* buffer, int len, char c) {
-    for (int pos = 0; pos < len; pos++) {
-        if (buffer[pos] == c) {
-            return pos;
-        }
-    }
-    return -1;
-}
-
-#define MAX_STRING_BUFFER 512
-
-bool ModelLoader::parse_data_pkl(uint8_t* buffer,
-                                 size_t buffer_size,
-                                 zip_t* zip,
-                                 std::string dir,
-                                 size_t file_index,
-                                 const std::string prefix) {
-    uint8_t* buffer_end = buffer + buffer_size;
-    if (buffer[0] == 0x80) {  // proto
-        if (buffer[1] != 2) {
-            LOG_ERROR("Unsupported protocol\n");
-            return false;
-        }
-        buffer += 2;  // 0x80 and version
-        char string_buffer[MAX_STRING_BUFFER];
-        bool finish = false;
-        PickleTensorReader reader;
-        // read pickle binary file
-        while (!finish && buffer < buffer_end) {
-            uint8_t opcode = *buffer;
-            buffer++;
-            // https://github.com/python/cpython/blob/3.7/Lib/pickletools.py#L1048
-            // https://github.com/python/cpython/blob/main/Lib/pickle.py#L105
-            switch (opcode) {
-                case '}':  // EMPTY_DICT     = b'}'   # push empty dict
-                    break;
-                case ']':  // EMPTY_LIST     = b']'   # push empty list
-                    break;
-                // skip unused sections
-                case 'h':  // BINGET         = b'h'   #   "    "    "    "   "   "  ;   "    " 1-byte arg
-                case 'q':  // BINPUT         = b'q'   #   "     "    "   "   " ;   "    " 1-byte arg
-                case 'Q':  // BINPERSID      = b'Q'   #  "       "         "  ;  "  "   "     "  stack
-                    buffer++;
-                    break;
-                case 'r':  // LONG_BINPUT    = b'r'   #   "     "    "   "   " ;   "    " 4-byte arg
-                    buffer += 4;
-                    break;
-                case 0x95:  // FRAME            = b'\x95'  # indicate the beginning of a new frame
-                    buffer += 8;
-                    break;
-                case 0x94:  // MEMOIZE          = b'\x94'  # store top of the stack in memo
-                    break;
-                case '(':  // MARK           = b'('   # push special markobject on stack
-                    break;
-                case 'K':  // BININT1        = b'K'   # push 1-byte unsigned int
-                {
-                    uint8_t value = *buffer;
-                    if (reader.read_int_value(value)) {
-                        buffer++;
-                    }
-                    buffer++;
-                } break;
-                case 'M':  // BININT2        = b'M'   # push 2-byte unsigned int
-                {
-                    uint16_t value = read_short(buffer);
-                    if (reader.read_int_value(value)) {
-                        buffer++;
-                    }
-                    buffer += 2;
-                } break;
-                case 'J':  // BININT         = b'J'   # push four-byte signed int
-                {
-                    const int32_t value = read_int(buffer);
-                    if (reader.read_int_value(value)) {
-                        buffer++;  // skip tuple after read num_elements
-                    }
-                    buffer += 4;
-                } break;
-                case 'X':  // BINUNICODE     = b'X'   #   "     "       "  ; counted UTF-8 string argument
-                {
-                    const int32_t len = read_int(buffer);
-                    buffer += 4;
-                    memset(string_buffer, 0, MAX_STRING_BUFFER);
-                    if (len > MAX_STRING_BUFFER) {
-                        LOG_WARN("tensor name very large");
-                    }
-                    memcpy(string_buffer, buffer, len < MAX_STRING_BUFFER ? len : (MAX_STRING_BUFFER - 1));
-                    buffer += len;
-                    reader.read_string(string_buffer, zip, dir);
-                } break;
-                case 0x8C:  // SHORT_BINUNICODE = b'\x8c'  # push short string; UTF-8 length < 256 bytes
-                {
-                    const int8_t len = *buffer;
-                    buffer++;
-                    memset(string_buffer, 0, MAX_STRING_BUFFER);
-                    memcpy(string_buffer, buffer, len);
-                    buffer += len;
-                    // printf("String: '%s'\n", string_buffer);
-                } break;
-                case 'c':  // GLOBAL         = b'c'   # push self.find_class(modname, name); 2 string args
-                {
-                    int len = find_char(buffer, MAX_STRING_BUFFER, '\n');
-
-                    buffer += len + 1;
-                    len = find_char(buffer, MAX_STRING_BUFFER, '\n');
-
-                    memset(string_buffer, 0, MAX_STRING_BUFFER);
-                    memcpy(string_buffer, buffer, len);
-                    buffer += len + 1;
-                    reader.read_global(string_buffer);
-                } break;
-                case 0x86:  // TUPLE2         = b'\x86'  # build 2-tuple from two topmost stack items
-                case 0x85:  // TUPLE1         = b'\x85'  # build 1-tuple from stack top
-                case 't':   // TUPLE          = b't'   # build tuple from topmost stack items
-                    if (reader.phase == PickleTensorReader::READ_DIMENS) {
-                        reader.tensor_storage.reverse_ne();
-                        reader.tensor_storage.file_index = file_index;
-                        // if(strcmp(prefix.c_str(), "scarlett") == 0)
-                        // printf(" ZIP got tensor %s \n ", reader.tensor_storage.name.c_str());
-                        std::string name = reader.tensor_storage.name;
-                        if (!starts_with(name, prefix)) {
-                            name = prefix + name;
-                        }
-                        reader.tensor_storage.name = name;
-                        add_tensor_storage(reader.tensor_storage);
-
-                        // LOG_DEBUG("%s", reader.tensor_storage.name.c_str());
-                        // reset
-                        reader = PickleTensorReader();
-                    }
-                    break;
-                case '.':  // STOP           = b'.'   # every pickle ends with STOP
-                    finish = true;
-                    break;
-                default:
-                    break;
-            }
-        }
-    }
-    return true;
-}
-
-bool ModelLoader::init_from_ckpt_file(const std::string& file_path, const std::string& prefix) {
-    LOG_DEBUG("init from '%s'", file_path.c_str());
-    file_paths_.push_back(file_path);
-    size_t file_index = file_paths_.size() - 1;
-
-    struct zip_t* zip = zip_open(file_path.c_str(), 0, 'r');
-    if (zip == nullptr) {
-        LOG_ERROR("failed to open '%s'", file_path.c_str());
-        return false;
-    }
-    int n = (int)zip_entries_total(zip);
-    for (int i = 0; i < n; ++i) {
-        zip_entry_openbyindex(zip, i);
-        {
-            std::string name = zip_entry_name(zip);
-            size_t pos       = name.find("data.pkl");
-            if (pos != std::string::npos) {
-                std::string dir = name.substr(0, pos);
-                printf("ZIP %d, name = %s, dir = %s \n", i, name.c_str(), dir.c_str());
-                void* pkl_data = nullptr;
-                size_t pkl_size;
-                zip_entry_read(zip, &pkl_data, &pkl_size);
-
-                // LOG_DEBUG("%lld", pkl_size);
-
-                parse_data_pkl((uint8_t*)pkl_data, pkl_size, zip, dir, file_index, prefix);
-
-                free(pkl_data);
-            }
-        }
-        zip_entry_close(zip);
-    }
-    zip_close(zip);
-    return true;
-}
-
 SDVersion ModelLoader::get_sd_version() {
 
     return VERSION_FLUX2_KLEIN;
@@ -1182,7 +754,6 @@ std::string ModelLoader::load_qwen2_merges() {
 bool ModelLoader::load_tensors(on_new_tensor_cb_t on_new_tensor_cb, int n_threads_p, bool enable_mmap) {
     int64_t process_time_ms = 0;
     std::atomic<int64_t> read_time_ms(0);
-    std::atomic<int64_t> memcpy_time_ms(0);
     std::atomic<int64_t> copy_to_backend_time_ms(0);
     std::atomic<int64_t> convert_time_ms(0);
 
@@ -1221,16 +792,8 @@ bool ModelLoader::load_tensors(on_new_tensor_cb_t on_new_tensor_cb, int n_thread
             continue;
         }
 
-        bool is_zip = false;
-        for (auto const& ts : file_tensors) {
-            if (ts->index_in_zip >= 0) {
-                is_zip = true;
-                break;
-            }
-        }
-
         std::unique_ptr<MmapWrapper> mmapped;
-        if (enable_mmap && !is_zip) {
+        if (enable_mmap) {
             LOG_DEBUG("using mmap for I/O");
             mmapped = MmapWrapper::create(file_path);
             if (!mmapped) {
@@ -1238,7 +801,7 @@ bool ModelLoader::load_tensors(on_new_tensor_cb_t on_new_tensor_cb, int n_thread
             }
         }
 
-        int n_threads = is_zip ? 1 : std::min(num_threads_to_use, (int)file_tensors.size());
+        int n_threads = std::min(num_threads_to_use, (int)file_tensors.size());
         if (n_threads < 1) {
             n_threads = 1;
         }
@@ -1249,17 +812,9 @@ bool ModelLoader::load_tensors(on_new_tensor_cb_t on_new_tensor_cb, int n_thread
         std::vector<std::thread> workers;
 
         for (int i = 0; i < n_threads; ++i) {
-            workers.emplace_back([&, file_path, is_zip]() {
+            workers.emplace_back([&, file_path]() {
                 std::ifstream file;
-                struct zip_t* zip = nullptr;
-                if (is_zip) {
-                    zip = zip_open(file_path.c_str(), 0, 'r');
-                    if (zip == nullptr) {
-                        LOG_ERROR("failed to open zip '%s'", file_path.c_str());
-                        failed = true;
-                        return;
-                    }
-                } else if (!mmapped) {
+                if (!mmapped) {
                     file.open(file_path, std::ios::binary);
                     if (!file.is_open()) {
                         LOG_ERROR("failed to open '%s'", file_path.c_str());
@@ -1298,21 +853,7 @@ bool ModelLoader::load_tensors(on_new_tensor_cb_t on_new_tensor_cb, int n_thread
                     size_t nbytes_to_read = tensor_storage.nbytes_to_read();
 
                     auto read_data = [&](char* buf, size_t n) {
-                        if (zip != nullptr) {
-                            zip_entry_openbyindex(zip, tensor_storage.index_in_zip);
-                            size_t entry_size = zip_entry_size(zip);
-                            if (entry_size != n) {
-                                int64_t t_memcpy_start;
-                                read_buffer.resize(entry_size);
-                                zip_entry_noallocread(zip, (void*)read_buffer.data(), entry_size);
-                                t_memcpy_start = ggml_time_ms();
-                                memcpy((void*)buf, (void*)(read_buffer.data() + tensor_storage.offset), n);
-                                memcpy_time_ms.fetch_add(ggml_time_ms() - t_memcpy_start);
-                            } else {
-                                zip_entry_noallocread(zip, (void*)buf, n);
-                            }
-                            zip_entry_close(zip);
-                        } else if (mmapped) {
+                        if (mmapped) {
                             if (!mmapped->copy_data(buf, n, tensor_storage.offset)) {
                                 LOG_ERROR("read tensor data failed: '%s'", file_path.c_str());
                                 failed = true;
@@ -1397,9 +938,6 @@ bool ModelLoader::load_tensors(on_new_tensor_cb_t on_new_tensor_cb, int n_thread
                         copy_to_backend_time_ms.fetch_add(t1 - t0);
                     }
                 }
-                if (zip != nullptr) {
-                    zip_close(zip);
-                }
             });
         }
 
@@ -1429,11 +967,10 @@ bool ModelLoader::load_tensors(on_new_tensor_cb_t on_new_tensor_cb, int n_thread
     }
 
     int64_t end_time = ggml_time_ms();
-    LOG_INFO("loading tensors completed, taking %.2fs (process: %.2fs, read: %.2fs, memcpy: %.2fs, convert: %.2fs, copy_to_backend: %.2fs)",
+    LOG_INFO("loading tensors completed, taking %.2fs (process: %.2fs, read: %.2fs, convert: %.2fs, copy_to_backend: %.2fs)",
              (end_time - start_time) / 1000.f,
              process_time_ms / 1000.f,
              (read_time_ms.load() / (float)last_n_threads) / 1000.f,
-             (memcpy_time_ms.load() / (float)last_n_threads) / 1000.f,
              (convert_time_ms.load() / (float)last_n_threads) / 1000.f,
              (copy_to_backend_time_ms.load() / (float)last_n_threads) / 1000.f);
     return success;
@@ -1494,14 +1031,6 @@ bool ModelLoader::load_tensors(std::map<std::string, struct ggml_tensor*>& tenso
     bool some_tensor_not_init = false;
 
     for (auto pair : tensors) {
-        if (pair.first.find("cond_stage_model.transformer.text_model.encoder.layers.23") != std::string::npos) {
-            continue;
-        }
-
-        if (pair.first.find("alphas_cumprod") != std::string::npos) {
-            continue;
-        }
-
         if (tensor_names_in_file.find(pair.first) == tensor_names_in_file.end()) {
             LOG_ERROR("tensor '%s' not in model file", pair.first.c_str());
             some_tensor_not_init = true;
@@ -1530,14 +1059,6 @@ bool ModelLoader::tensor_should_be_converted(const TensorStorage& tensor_storage
                    contains(name, "guidance_in.") ||
                    contains(name, "final_layer.")) {
             // Pass, do not convert. For FLUX
-        } else if (contains(name, "x_embedder.") ||
-                   contains(name, "t_embedder.") ||
-                   contains(name, "y_embedder.") ||
-                   contains(name, "pos_embed") ||
-                   contains(name, "context_embedder.")) {
-            // Pass, do not convert. For MMDiT
-        } else if (contains(name, "time_embed.") || contains(name, "label_emb.")) {
-            // Pass, do not convert. For Unet
         } else if (contains(name, "embedding")) {
             // Pass, do not convert embedding
         } else {

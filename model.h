@@ -16,7 +16,6 @@
 #include "gguf.h"
 #include "json.hpp"
 #include "ordered_map.hpp"
-#include "zip.h"
 
 #define SD_MAX_DIMS 5
 
@@ -181,7 +180,6 @@ struct TensorStorage {
     int n_dims              = 0;
 
     size_t file_index = 0;
-    int index_in_zip  = -1;  // >= means stored in a zip file
     uint64_t offset   = 0;   // offset in file
 
     TensorStorage() = default;
@@ -288,17 +286,8 @@ protected:
 
     void add_tensor_storage(const TensorStorage& tensor_storage);
 
-    bool parse_data_pkl(uint8_t* buffer,
-                        size_t buffer_size,
-                        zip_t* zip,
-                        std::string dir,
-                        size_t file_index,
-                        const std::string prefix);
-
     bool init_from_gguf_file(const std::string& file_path, const std::string& prefix = "");
     bool init_from_safetensors_file(const std::string& file_path, const std::string& prefix = "");
-    bool init_from_ckpt_file(const std::string& file_path, const std::string& prefix = "");
-    bool init_from_diffusers_file(const std::string& file_path, const std::string& prefix = "");
 
 public:
     bool init_from_file(const std::string& file_path, const std::string& prefix = "");
@@ -332,11 +321,7 @@ public:
     int64_t get_params_mem_size(ggml_backend_t backend, ggml_type type = GGML_TYPE_COUNT);
     ~ModelLoader() = default;
 
-    static std::string load_merges();
     static std::string load_qwen2_merges();
-    static std::string load_mistral_vocab_json();
-    static std::string load_t5_tokenizer_json();
-    static std::string load_umt5_tokenizer_json();
 };
 
 #endif  // __MODEL_H__
