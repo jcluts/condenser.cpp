@@ -101,6 +101,10 @@ static void json_progress_cb(int step, int steps, float time, void* data) {
 // Each entry is typically ~15 MB (Qwen hidden states), so 16 entries ≈ 240 MB.
 constexpr size_t MAX_PROMPT_CACHE_ENTRIES = 16;
 
+// Maximum number of cached reference image latents before LRU eviction.
+// Each entry is typically ~2 MB (1024×1024 latent), so 8 entries ≈ 16 MB.
+constexpr size_t MAX_LATENT_CACHE_ENTRIES = 8;
+
 struct CachedCondition {
     sd_condition_t* condition = nullptr;
     std::chrono::steady_clock::time_point last_used;
@@ -127,6 +131,49 @@ struct CachedCondition {
         return *this;
     }
 };
+
+struct CachedLatent {
+    sd_latent_t* latent = nullptr;
+    std::string file_path;
+    uint64_t file_mtime = 0;    // filesystem modification time
+    uint64_t file_size  = 0;    // additional validation
+    std::chrono::steady_clock::time_point last_used;
+
+    CachedLatent() = default;
+    CachedLatent(sd_latent_t* l, const std::string& path, uint64_t mtime, uint64_t size)
+        : latent(l), file_path(path), file_mtime(mtime), file_size(size),
+          last_used(std::chrono::steady_clock::now()) {}
+
+    ~CachedLatent() {
+        if (latent) { sd_free_latent(latent); latent = nullptr; }
+    }
+
+    // Non-copyable, movable
+    CachedLatent(const CachedLatent&) = delete;
+    CachedLatent& operator=(const CachedLatent&) = delete;
+    CachedLatent(CachedLatent&& o) noexcept
+        : latent(o.latent), file_path(std::move(o.file_path)),
+          file_mtime(o.file_mtime), file_size(o.file_size), last_used(o.last_used)
+        { o.latent = nullptr; }
+    CachedLatent& operator=(CachedLatent&& o) noexcept {
+        if (this != &o) {
+            if (latent) sd_free_latent(latent);
+            latent = o.latent;
+            file_path = std::move(o.file_path);
+            file_mtime = o.file_mtime;
+            file_size = o.file_size;
+            last_used = o.last_used;
+            o.latent = nullptr;
+        }
+        return *this;
+    }
+};
+
+// Build a cache key from file path + modification time + size.
+// This catches re-edits of the same file without needing a content hash.
+static std::string make_latent_cache_key(const std::string& path, uint64_t mtime, uint64_t size) {
+    return path + "|" + std::to_string(mtime) + "|" + std::to_string(size);
+}
 
 struct EngineState {
     sd_ctx_t* ctx                  = nullptr;
@@ -159,6 +206,34 @@ struct EngineState {
                     prompt_cache.size());
             fflush(stderr);
             prompt_cache.erase(oldest);
+        }
+    }
+
+    // Reference image latent cache — keyed by file_path|mtime|size.
+    // Cleared on model load/unload since different models produce different latents.
+    std::unordered_map<std::string, CachedLatent> latent_cache;
+
+    void clear_latent_cache() {
+        if (!latent_cache.empty()) {
+            fprintf(stderr, "[INFO ] Clearing latent cache (%zu entries).\n", latent_cache.size());
+            fflush(stderr);
+        }
+        latent_cache.clear();
+    }
+
+    void evict_latent_cache_if_needed() {
+        if (latent_cache.size() < MAX_LATENT_CACHE_ENTRIES) return;
+        auto oldest = latent_cache.end();
+        for (auto it = latent_cache.begin(); it != latent_cache.end(); ++it) {
+            if (oldest == latent_cache.end() || it->second.last_used < oldest->second.last_used) {
+                oldest = it;
+            }
+        }
+        if (oldest != latent_cache.end()) {
+            fprintf(stderr, "[INFO ] Latent cache full (%zu entries), evicting LRU entry.\n",
+                    latent_cache.size());
+            fflush(stderr);
+            latent_cache.erase(oldest);
         }
     }
 };
@@ -216,6 +291,7 @@ static void handle_status(const std::string& id, const EngineState& state) {
 static void handle_unload(const std::string& id, EngineState& state) {
     if (state.ctx) {
         state.clear_prompt_cache();
+        state.clear_latent_cache();
         free_sd_ctx(state.ctx);
         state.ctx = nullptr;
         state.loaded_model_info.clear();
@@ -227,6 +303,7 @@ static void handle_unload(const std::string& id, EngineState& state) {
 
 static void handle_quit(const std::string& id, EngineState& state) {
     state.clear_prompt_cache();
+    state.clear_latent_cache();
     if (state.ctx) {
         free_sd_ctx(state.ctx);
         state.ctx = nullptr;
@@ -246,6 +323,7 @@ static void handle_load(const std::string& id, const json& request, EngineState&
     // Free any existing context first
     if (state.ctx) {
         state.clear_prompt_cache();
+        state.clear_latent_cache();
         free_sd_ctx(state.ctx);
         state.ctx = nullptr;
         state.loaded_model_info.clear();
@@ -506,6 +584,103 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
         }
     }
 
+    // --- Reference image latent cache logic ---
+    // Cache key includes file path + mtime + size to detect re-edits.
+    bool use_ref_latent_cache = p.value("use_ref_latent_cache", true);
+    std::vector<const sd_latent_t*> cached_latents;
+    bool all_latents_cached = false;
+    bool any_latent_cache_hit = false;
+
+    if (use_ref_latent_cache && !ref_paths.empty()) {
+        bool all_hit = true;
+        for (size_t i = 0; i < ref_paths.size(); i++) {
+            const auto& img_path = ref_paths[i];
+            std::error_code ec;
+            uint64_t mtime = 0;
+            uint64_t fsize = 0;
+
+            auto ftime = fs::last_write_time(img_path, ec);
+            if (!ec) {
+                mtime = static_cast<uint64_t>(ftime.time_since_epoch().count());
+                fsize = static_cast<uint64_t>(fs::file_size(img_path, ec));
+            }
+
+            std::string cache_key = make_latent_cache_key(img_path, mtime, fsize);
+            auto it = state.latent_cache.find(cache_key);
+            if (it != state.latent_cache.end()) {
+                it->second.last_used = std::chrono::steady_clock::now();
+                cached_latents.push_back(it->second.latent);
+                any_latent_cache_hit = true;
+                fprintf(stderr, "[INFO ] Latent cache hit for: \"%s\"\n",
+                        sd_basename(img_path).c_str());
+                fflush(stderr);
+            } else {
+                all_hit = false;
+                cached_latents.push_back(nullptr);  // placeholder — will encode below
+            }
+        }
+        all_latents_cached = all_hit;
+
+        if (all_latents_cached) {
+            write_progress(id, {
+                {"phase", "encoding"},
+                {"message", "Reference image cache hit — skipping VAE encode"},
+                {"cache_hit", true}
+            });
+        } else if (any_latent_cache_hit) {
+            write_progress(id, {
+                {"phase", "encoding"},
+                {"message", "Partial reference image cache hit — encoding remaining images..."},
+                {"cache_hit", false}
+            });
+        }
+
+        // For any cache misses, encode the ref images and cache the results
+        if (!all_latents_cached) {
+            for (size_t i = 0; i < ref_paths.size(); i++) {
+                if (cached_latents[i] != nullptr) continue;  // already cached
+
+                // Encode this ref image
+                if (i < ref_images.size()) {
+                    sd_latent_t* new_latent = sd_encode_ref_image(state.ctx, &ref_images[i]);
+                    if (new_latent) {
+                        const auto& img_path = ref_paths[i];
+                        std::error_code ec;
+                        uint64_t mtime = 0;
+                        uint64_t fsize = 0;
+                        auto ftime = fs::last_write_time(img_path, ec);
+                        if (!ec) {
+                            mtime = static_cast<uint64_t>(ftime.time_since_epoch().count());
+                            fsize = static_cast<uint64_t>(fs::file_size(img_path, ec));
+                        }
+                        std::string cache_key = make_latent_cache_key(img_path, mtime, fsize);
+
+                        state.evict_latent_cache_if_needed();
+                        cached_latents[i] = new_latent;
+                        state.latent_cache.emplace(cache_key,
+                            CachedLatent(new_latent, img_path, mtime, fsize));
+                        fprintf(stderr, "[INFO ] Latent cached: \"%s\" (cache size: %zu)\n",
+                                sd_basename(img_path).c_str(), state.latent_cache.size());
+                        fflush(stderr);
+                    } else {
+                        fprintf(stderr, "[WARN ] sd_encode_ref_image failed for: %s\n",
+                                ref_paths[i].c_str());
+                        fflush(stderr);
+                    }
+                }
+            }
+
+            // Check if all latents are now available
+            all_latents_cached = true;
+            for (auto* lat : cached_latents) {
+                if (!lat) { all_latents_cached = false; break; }
+            }
+        }
+    }
+
+    // Determine if we have usable cached latents
+    bool have_cached_latents = !cached_latents.empty() && all_latents_cached;
+
     // Set up progress callback for sampling steps
     ProgressCtx prog_ctx{id};
     sd_set_progress_callback(json_progress_cb, &prog_ctx);
@@ -527,13 +702,23 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
     img_gen_params.cache             = cache_params;
 
     // --- Run generation ---
+    // Choose the most efficient generation path based on what's cached:
+    //   1. Both condition + latents cached → generate_image_with_condition_and_latents
+    //   2. Only condition cached → generate_image_with_condition (encodes refs internally)
+    //   3. Only latents cached → generate_image_with_condition_and_latents (condition=NULL)
+    //   4. Nothing cached → generate_image (full pipeline)
     sd_image_t* results = nullptr;
 
-    if (cached_condition) {
-        // Use the cached condition — skips the text encoder inside generate
+    if (have_cached_latents) {
+        // Use cached latents (and optionally cached condition)
+        results = generate_image_with_condition_and_latents(
+            state.ctx, &img_gen_params, cached_condition,
+            cached_latents.data(), static_cast<int>(cached_latents.size()));
+    } else if (cached_condition) {
+        // Only condition cached — ref images encoded inside generate
         results = generate_image_with_condition(state.ctx, &img_gen_params, cached_condition);
     } else {
-        // No cached condition — run the full pipeline
+        // No caches — run the full pipeline
         results = generate_image(state.ctx, &img_gen_params);
     }
 
@@ -613,7 +798,8 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
         {"seed", seed},
         {"total_time_ms", elapsed_ms},
         {"images_saved", saved_count},
-        {"prompt_cache_hit", prompt_cache_hit}
+        {"prompt_cache_hit", prompt_cache_hit},
+        {"ref_latent_cache_hit", any_latent_cache_hit}
     };
     if (output_paths.size() == 1) {
         result_data["output"] = output_paths[0];
@@ -689,6 +875,7 @@ int main(int argc, const char* argv[]) {
 
     // Clean shutdown if stdin closes (parent process died)
     state.clear_prompt_cache();
+    state.clear_latent_cache();
     if (state.ctx) {
         fprintf(stderr, "[INFO ] stdin closed — cleaning up.\n");
         fflush(stderr);

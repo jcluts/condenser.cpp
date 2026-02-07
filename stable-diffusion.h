@@ -224,6 +224,7 @@ typedef struct {
 
 typedef struct sd_ctx_t sd_ctx_t;
 typedef struct sd_condition_t sd_condition_t;
+typedef struct sd_latent_t sd_latent_t;
 
 typedef void (*sd_log_cb_t)(enum sd_log_level_t level, const char* text, void* data);
 typedef void (*sd_progress_cb_t)(int step, int steps, float time, void* data);
@@ -292,6 +293,32 @@ SD_API sd_image_t* generate_image_with_condition(sd_ctx_t* sd_ctx,
 
 // Free a condition returned by sd_compute_condition().
 SD_API void sd_free_condition(sd_condition_t* condition);
+
+// --- Reference image latent cache API ---
+// These functions allow callers to pre-compute and cache the VAE-encoded
+// latent representation of reference images, then reuse across generations
+// with different seeds, prompts, or sampling parameters.
+
+// Encode a reference image to its VAE latent representation.
+// The returned sd_latent_t* owns its memory and is independent of any
+// ggml_context — it can be stored indefinitely and reused.
+SD_API sd_latent_t* sd_encode_ref_image(sd_ctx_t* ctx, const sd_image_t* image);
+
+// Generate image(s) using pre-computed condition and/or pre-encoded latents.
+// condition may be NULL (compute from prompt).
+// ref_latents/ref_latents_count may be NULL/0 (encode from ref_images in params).
+// When ref_latents are provided, they REPLACE the VAE encode step for reference
+// images. The ref_images in params are still used for conditioning if condition
+// is NULL.
+SD_API sd_image_t* generate_image_with_condition_and_latents(
+    sd_ctx_t* sd_ctx,
+    const sd_img_gen_params_t* params,
+    const sd_condition_t* condition,
+    const sd_latent_t* const* ref_latents,
+    int ref_latents_count);
+
+// Free a latent returned by sd_encode_ref_image().
+SD_API void sd_free_latent(sd_latent_t* latent);
 
 typedef struct upscaler_ctx_t upscaler_ctx_t;
 

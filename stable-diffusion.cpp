@@ -37,6 +37,18 @@ struct sd_condition_t {
     int      concat_n_dims = 0;
 };
 
+// ---------------------------------------------------------------------------
+// sd_latent_t — self-contained serialized VAE latent representation
+// ---------------------------------------------------------------------------
+
+struct sd_latent_t {
+    // Serialized tensor data (F32) and shape for a single latent tensor.
+    // Owns its memory and is independent of any ggml_context.
+    std::vector<float> data;
+    int64_t ne[4] = {0, 0, 0, 0};
+    int n_dims = 0;
+};
+
 // Serialize an SDCondition (whose tensors live in a work_ctx) into an
 // sd_condition_t that owns copies of the data.
 static sd_condition_t* serialize_condition(const SDCondition& cond) {
@@ -97,6 +109,41 @@ static SDCondition deserialize_condition(ggml_context* work_ctx, const sd_condit
     cond.c_vector    = restore_tensor(cached->vector_data,    cached->vector_ne,    cached->vector_n_dims);
     cond.c_concat    = restore_tensor(cached->concat_data,    cached->concat_ne,    cached->concat_n_dims);
     return cond;
+}
+
+// ---------------------------------------------------------------------------
+// Latent serialization helpers
+// ---------------------------------------------------------------------------
+
+static sd_latent_t* serialize_latent(ggml_tensor* tensor) {
+    if (!tensor) return nullptr;
+    auto* out = new sd_latent_t();
+    out->n_dims = ggml_n_dims(tensor);
+    for (int d = 0; d < 4; d++) out->ne[d] = tensor->ne[d];
+    int64_t n = ggml_nelements(tensor);
+    out->data.resize(n);
+    if (tensor->type == GGML_TYPE_F32) {
+        memcpy(out->data.data(), tensor->data, n * sizeof(float));
+    } else {
+        for (int64_t i = 0; i < n; i++) {
+            out->data[i] = ggml_get_f32_1d(tensor, i);
+        }
+    }
+    return out;
+}
+
+static ggml_tensor* deserialize_latent(ggml_context* work_ctx, const sd_latent_t* cached) {
+    if (!cached || cached->n_dims == 0 || cached->data.empty()) return nullptr;
+    struct ggml_tensor* t = nullptr;
+    switch (cached->n_dims) {
+        case 1: t = ggml_new_tensor_1d(work_ctx, GGML_TYPE_F32, cached->ne[0]); break;
+        case 2: t = ggml_new_tensor_2d(work_ctx, GGML_TYPE_F32, cached->ne[0], cached->ne[1]); break;
+        case 3: t = ggml_new_tensor_3d(work_ctx, GGML_TYPE_F32, cached->ne[0], cached->ne[1], cached->ne[2]); break;
+        case 4: t = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, cached->ne[0], cached->ne[1], cached->ne[2], cached->ne[3]); break;
+        default: return nullptr;
+    }
+    memcpy(t->data, cached->data.data(), cached->data.size() * sizeof(float));
+    return t;
 }
 
 // Indexed by SDVersion enum
@@ -2046,4 +2093,217 @@ sd_image_t* generate_image_with_condition(sd_ctx_t* sd_ctx,
 
 void sd_free_condition(sd_condition_t* condition) {
     delete condition;
+}
+
+// ---------------------------------------------------------------------------
+// Reference image latent cache API
+// ---------------------------------------------------------------------------
+
+sd_latent_t* sd_encode_ref_image(sd_ctx_t* ctx, const sd_image_t* image) {
+    if (!ctx || !ctx->sd || !image || !image->data) {
+        LOG_ERROR("sd_encode_ref_image: invalid arguments");
+        return nullptr;
+    }
+
+    struct ggml_init_params params;
+    params.mem_size   = static_cast<size_t>(256) * 1024 * 1024;  // 256 MB
+    params.mem_buffer = nullptr;
+    params.no_alloc   = false;
+
+    struct ggml_context* work_ctx = ggml_init(params);
+    if (!work_ctx) {
+        LOG_ERROR("sd_encode_ref_image: ggml_init() failed");
+        return nullptr;
+    }
+
+    int64_t t0 = ggml_time_ms();
+
+    // Convert the sd_image_t to a ggml tensor
+    ggml_tensor* img_tensor = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32,
+                                                  image->width, image->height,
+                                                  3, 1);
+    sd_image_to_ggml_tensor(*image, img_tensor);
+
+    // Encode through VAE
+    ggml_tensor* latent = ctx->sd->encode_first_stage(work_ctx, img_tensor);
+    if (!latent) {
+        LOG_ERROR("sd_encode_ref_image: encode_first_stage returned null");
+        ggml_free(work_ctx);
+        return nullptr;
+    }
+
+    int64_t t1 = ggml_time_ms();
+    LOG_INFO("sd_encode_ref_image completed (%dx%d), taking %" PRId64 " ms",
+             image->width, image->height, t1 - t0);
+
+    // Serialize to self-contained sd_latent_t (copies data out of work_ctx)
+    sd_latent_t* result = serialize_latent(latent);
+
+    ggml_free(work_ctx);
+    return result;
+}
+
+sd_image_t* generate_image_with_condition_and_latents(
+    sd_ctx_t* sd_ctx,
+    const sd_img_gen_params_t* sd_img_gen_params,
+    const sd_condition_t* condition,
+    const sd_latent_t* const* ref_latents_cached,
+    int ref_latents_count) {
+
+    if (!sd_ctx || !sd_ctx->sd) {
+        LOG_ERROR("generate_image_with_condition_and_latents: invalid context");
+        return nullptr;
+    }
+
+    sd_ctx->sd->vae_tiling_params = sd_img_gen_params->vae_tiling_params;
+    int width                     = sd_img_gen_params->width;
+    int height                    = sd_img_gen_params->height;
+
+    int vae_scale_factor            = sd_ctx->sd->get_vae_scale_factor();
+    int diffusion_model_down_factor = sd_ctx->sd->get_diffusion_model_down_factor();
+    int spatial_multiple            = vae_scale_factor * diffusion_model_down_factor;
+
+    int width_offset  = align_up_offset(width, spatial_multiple);
+    int height_offset = align_up_offset(height, spatial_multiple);
+    if (width_offset > 0 || height_offset > 0) {
+        width += width_offset;
+        height += height_offset;
+        LOG_WARN("align up %dx%d to %dx%d (multiple=%d)",
+                 sd_img_gen_params->width, sd_img_gen_params->height,
+                 width, height, spatial_multiple);
+    }
+
+    LOG_DEBUG("generate_image_with_condition_and_latents %dx%d", width, height);
+
+    struct ggml_init_params params;
+    params.mem_size   = static_cast<size_t>(1024 * 1024) * 1024;  // 1G
+    params.mem_buffer = nullptr;
+    params.no_alloc   = false;
+
+    struct ggml_context* work_ctx = ggml_init(params);
+    if (!work_ctx) {
+        LOG_ERROR("ggml_init() failed");
+        return nullptr;
+    }
+
+    int64_t seed = sd_img_gen_params->seed;
+    if (seed < 0) {
+        srand((int)time(nullptr));
+        seed = rand();
+    }
+    sd_ctx->sd->rng->manual_seed(seed);
+    sd_ctx->sd->sampler_rng->manual_seed(seed);
+
+    size_t t0 = ggml_time_ms();
+
+    enum sample_method_t sample_method = sd_img_gen_params->sample_params.sample_method;
+    if (sample_method == SAMPLE_METHOD_COUNT) {
+        sample_method = sd_get_default_sample_method(sd_ctx);
+    }
+    LOG_INFO("sampling using %s method", sampling_methods_str[sample_method]);
+
+    int sample_steps = sd_img_gen_params->sample_params.sample_steps;
+    if (sd_version_is_flux2(sd_ctx->sd->version) &&
+        sd_img_gen_params->sample_params.custom_sigmas_count == 0 &&
+        sample_steps == 20) {
+        LOG_INFO("Flux2 distilled default steps detected; using 4 steps");
+        sample_steps = 4;
+    }
+    std::vector<float> sigmas;
+    if (sd_img_gen_params->sample_params.custom_sigmas_count > 0) {
+        sigmas = std::vector<float>(
+            sd_img_gen_params->sample_params.custom_sigmas,
+            sd_img_gen_params->sample_params.custom_sigmas +
+                sd_img_gen_params->sample_params.custom_sigmas_count);
+        if (sample_steps != (int)sigmas.size() - 1) {
+            sample_steps = static_cast<int>(sigmas.size()) - 1;
+            LOG_WARN("sample_steps != custom_sigmas_count - 1, set sample_steps to %d", sample_steps);
+        }
+    } else {
+        scheduler_t scheduler = sd_img_gen_params->sample_params.scheduler;
+        if (scheduler == SCHEDULER_COUNT) {
+            scheduler = sd_get_default_scheduler(sd_ctx, sample_method);
+        }
+        sigmas = sd_ctx->sd->denoiser->get_sigmas(
+            sample_steps,
+            sd_ctx->sd->get_image_seq_len(height, width),
+            scheduler,
+            sd_ctx->sd->version);
+    }
+
+    ggml_tensor* init_latent = nullptr;
+    LOG_INFO("TXT2IMG (with pre-computed condition + cached latents)");
+    init_latent = sd_ctx->sd->generate_init_latent(work_ctx, width, height);
+
+    float distilled_guidance = sd_img_gen_params->sample_params.guidance.distilled_guidance;
+    if (distilled_guidance == 3.5f) {
+        distilled_guidance = 1.0f;
+    }
+
+    // Build ref_images vector (needed for conditioning if condition is NULL)
+    std::vector<sd_image_t*> ref_images;
+    for (int i = 0; i < sd_img_gen_params->ref_images_count; i++) {
+        ref_images.push_back(&sd_img_gen_params->ref_images[i]);
+    }
+
+    // Deserialize pre-encoded reference latents
+    std::vector<ggml_tensor*> ref_latents;
+    if (ref_latents_cached && ref_latents_count > 0) {
+        LOG_INFO("using %d pre-encoded reference latent(s) (latent cache hit)", ref_latents_count);
+        for (int i = 0; i < ref_latents_count; i++) {
+            ggml_tensor* lat = deserialize_latent(work_ctx, ref_latents_cached[i]);
+            if (lat) {
+                ref_latents.push_back(lat);
+            } else {
+                LOG_WARN("failed to deserialize cached latent %d, falling back to encode", i);
+                // Fall back: encode this image from params
+                if (i < sd_img_gen_params->ref_images_count) {
+                    ggml_tensor* img = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32,
+                                                          sd_img_gen_params->ref_images[i].width,
+                                                          sd_img_gen_params->ref_images[i].height,
+                                                          3, 1);
+                    sd_image_to_ggml_tensor(sd_img_gen_params->ref_images[i], img);
+                    ggml_tensor* latent = sd_ctx->sd->encode_first_stage(work_ctx, img);
+                    ref_latents.push_back(latent);
+                }
+            }
+        }
+    } else {
+        // No cached latents — encode reference images as usual
+        for (int i = 0; i < (int)ref_images.size(); i++) {
+            ggml_tensor* img = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32,
+                                                  ref_images[i]->width, ref_images[i]->height,
+                                                  3, 1);
+            sd_image_to_ggml_tensor(*ref_images[i], img);
+            ggml_tensor* latent = sd_ctx->sd->encode_first_stage(work_ctx, img);
+            ref_latents.push_back(latent);
+        }
+        if (sd_img_gen_params->ref_images_count > 0) {
+            size_t t1 = ggml_time_ms();
+            LOG_INFO("encode_first_stage completed, taking %.2fs", (t1 - t0) * 1.0f / 1000);
+        }
+    }
+
+    // Generate with pre-computed condition (and possibly cached latents)
+    sd_image_t* result_images = generate_image_internal(
+        sd_ctx, work_ctx, init_latent,
+        SAFE_STR(sd_img_gen_params->prompt),
+        distilled_guidance,
+        sd_img_gen_params->sample_params.eta,
+        width, height,
+        sample_method, sigmas, seed,
+        sd_img_gen_params->batch_count,
+        ref_images, ref_latents,
+        sd_img_gen_params->increase_ref_index,
+        &sd_img_gen_params->cache,
+        condition);  // may be NULL
+
+    size_t t2 = ggml_time_ms();
+    LOG_INFO("generate_image_with_condition_and_latents completed in %.2fs", (t2 - t0) * 1.0f / 1000);
+
+    return result_images;
+}
+
+void sd_free_latent(sd_latent_t* latent) {
+    delete latent;
 }

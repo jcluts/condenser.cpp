@@ -120,17 +120,21 @@ Generates images using the currently loaded model. Fails if no model is loaded.
     "cache": {
       "mode": "disabled"
     },
-    "use_prompt_cache": true
+    "use_prompt_cache": true,
+    "use_ref_latent_cache": true
   }
 }
 ```
 
 **`use_prompt_cache`** (default: `true`): When enabled, the engine caches the text encoder (LLM) output keyed by prompt string. On subsequent generations with the same prompt but a different seed, dimensions, or sampling settings, the text encoder is skipped entirely — saving ~0.5-2s per generation. The cache is automatically cleared on model load/unload. Up to 16 prompt conditions are cached with LRU eviction.
 
+**`use_ref_latent_cache`** (default: `true`): When enabled, the engine caches the VAE-encoded latent representation of reference images, keyed by file path + modification time + file size. On subsequent img2img generations with the same reference image but different seeds or prompts, the VAE encode step is skipped — saving ~1-3s per generation. Up to 8 latents are cached with LRU eviction.
+
 During generation, the engine emits streaming progress messages:
 
 ```json
 {"id": "req-2", "type": "progress", "data": {"phase": "conditioning", "message": "Prompt cache hit — skipping text encoder", "cache_hit": true}}
+{"id": "req-2", "type": "progress", "data": {"phase": "encoding", "message": "Reference image cache hit — skipping VAE encode", "cache_hit": true}}
 {"id": "req-2", "type": "progress", "data": {"phase": "sampling", "step": 1, "total_steps": 4, "step_time_s": 1.2}}
 {"id": "req-2", "type": "progress", "data": {"phase": "sampling", "step": 2, "total_steps": 4, "step_time_s": 0.9}}
 {"id": "req-2", "type": "progress", "data": {"phase": "sampling", "step": 3, "total_steps": 4, "step_time_s": 0.9}}
@@ -143,9 +147,9 @@ On the first generation with a new prompt, the conditioning progress will show `
 {"id": "req-2", "type": "progress", "data": {"phase": "conditioning", "message": "Running text encoder (will cache result)...", "cache_hit": false}}
 ```
 
-Final result (includes `prompt_cache_hit` field):
+Final result (includes `prompt_cache_hit` and `ref_latent_cache_hit` fields):
 ```json
-{"id": "req-2", "type": "result", "data": {"success": true, "output": "/path/to/output.png", "seed": 42, "total_time_ms": 4200, "images_saved": 1, "prompt_cache_hit": false}}
+{"id": "req-2", "type": "result", "data": {"success": true, "output": "/path/to/output.png", "seed": 42, "total_time_ms": 4200, "images_saved": 1, "prompt_cache_hit": false, "ref_latent_cache_hit": false}}
 ```
 
 #### `unload` — Free VRAM
@@ -333,6 +337,35 @@ These are available to any application linking against the library, not just the
 |----------|---------------|------------|
 | Same prompt, new seed | ~0.5-2s conditioning | **~1ms deserialize** |
 | Different prompt | ~0.5-2s conditioning | ~0.5-2s conditioning (new cache entry) |
+
+## Reference Image Latent Cache
+
+The engine also caches VAE-encoded latent representations of reference images. When doing img2img with the same reference image across multiple generations (different seeds, prompts), the expensive VAE encode step (~1-3s) is skipped.
+
+**How it works:**
+1. First img2img generation with a reference image: runs the VAE encoder, caches the latent
+2. Subsequent generations with the same reference: skips the VAE encoder, uses the cached latent
+3. Modified reference image (different mtime/size): detects the change, re-encodes and caches
+
+**Cache key:** file path + filesystem modification time + file size. This catches re-edits without needing content hashing.
+
+**Cache management:**
+- Up to 8 latents are cached (LRU eviction when full, ~2 MB each)
+- Cache is automatically cleared on `load` (model change) or `unload`
+- Disable per-request with `"use_ref_latent_cache": false` in generate params
+
+**Library API:** The cache is built on three new C API functions:
+- `sd_encode_ref_image()` — encode a reference image to its latent representation (standalone)
+- `generate_image_with_condition_and_latents()` — generate using pre-computed condition and/or pre-encoded latents
+- `sd_free_latent()` — free a cached latent
+
+**Combined with prompt cache:** When both caches hit (same prompt + same reference image), the engine skips both the text encoder AND the VAE encoder — going directly to the denoising loop.
+
+| Workflow | Without Cache | With Both Caches |
+|----------|---------------|------------------|
+| Same ref + same prompt, new seed | ~2-5s encode+condition | **~2ms deserialize** |
+| Same ref, different prompt | ~1-3s encode | **~1ms deserialize** (latent cached) |
+| Different ref, same prompt | ~0.5-2s condition | **~1ms deserialize** (prompt cached) |
 
 ## Version
 
