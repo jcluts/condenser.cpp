@@ -395,7 +395,7 @@ protected:
     } dd_config;
 
 public:
-    AutoencodingEngine(SDVersion version          = VERSION_SD1,
+    AutoencodingEngine(SDVersion version          = VERSION_FLUX2_KLEIN,
                        bool decode_only           = true,
                        bool use_linear_projection = false,
                        bool use_video_decoder     = false)
@@ -528,7 +528,7 @@ struct AutoEncoderKL : public VAE {
                   const std::string prefix,
                   bool decode_only       = false,
                   bool use_video_decoder = false,
-                  SDVersion version      = VERSION_SD1)
+                  SDVersion version      = VERSION_FLUX2_KLEIN)
         : decode_only(decode_only), VAE(backend, offload_params_to_cpu) {
         bool use_linear_projection = false;
         for (const auto& [name, tensor_storage] : tensor_storage_map) {

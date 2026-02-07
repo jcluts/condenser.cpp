@@ -36,7 +36,6 @@ namespace fs = std::filesystem;
 
 const char* modes_str[] = {
     "img_gen",
-    "vid_gen",
     "convert",
     "upscale",
 };
@@ -44,7 +43,6 @@ const char* modes_str[] = {
 
 enum SDMode {
     IMG_GEN,
-    VID_GEN,
     CONVERT,
     UPSCALE,
     MODE_COUNT
@@ -845,7 +843,6 @@ static bool is_absolute_path(const std::string& p) {
 
 struct SDGenerationParams {
     std::string prompt;
-    std::string prompt_with_lora;  // for metadata record only
     std::string negative_prompt;
     int clip_skip   = -1;  // <= 0 represents unspecified
     int width       = -1;
@@ -1305,8 +1302,6 @@ struct SDGenerationParams {
     int get_resolved_height() const { return (height > 0) ? height : 512; }
 
     bool process_and_check(SDMode mode) {
-        prompt_with_lora = prompt;
-
         if (sample_params.sample_steps <= 0) {
             LOG_ERROR("error: the sample_steps must be greater than 0\n");
             return false;

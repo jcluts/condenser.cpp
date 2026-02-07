@@ -17,36 +17,10 @@
 #include "latent-preview.h"
 #include "name_conversion.h"
 
-// Indexed by SDVersion enum — only Flux 2 entries are meaningful
+// Indexed by SDVersion enum
 const char* model_version_to_str[] = {
-    "(unused)",         // VERSION_SD1
-    "(unused)",         // VERSION_SD1_INPAINT
-    "(unused)",         // VERSION_SD1_PIX2PIX
-    "(unused)",         // VERSION_SD1_TINY_UNET
-    "(unused)",         // VERSION_SD2
-    "(unused)",         // VERSION_SD2_INPAINT
-    "(unused)",         // VERSION_SD2_TINY_UNET
-    "(unused)",         // VERSION_SDXS
-    "(unused)",         // VERSION_SDXL
-    "(unused)",         // VERSION_SDXL_INPAINT
-    "(unused)",         // VERSION_SDXL_PIX2PIX
-    "(unused)",         // VERSION_SDXL_VEGA
-    "(unused)",         // VERSION_SDXL_SSD1B
-    "(unused)",         // VERSION_SVD
-    "(unused)",         // VERSION_SD3
-    "(unused)",         // VERSION_FLUX
-    "(unused)",         // VERSION_FLUX_FILL
-    "(unused)",         // VERSION_FLUX_CONTROLS
-    "(unused)",         // VERSION_FLEX_2
-    "(unused)",         // VERSION_CHROMA_RADIANCE
-    "(unused)",         // VERSION_WAN2
-    "(unused)",         // VERSION_WAN2_2_I2V
-    "(unused)",         // VERSION_WAN2_2_TI2V
-    "(unused)",         // VERSION_QWEN_IMAGE
     "Flux.2",           // VERSION_FLUX2
     "Flux.2 Klein",     // VERSION_FLUX2_KLEIN
-    "(unused)",         // VERSION_Z_IMAGE
-    "(unused)",         // VERSION_OVIS_IMAGE
 };
 
 const char* sampling_methods_str[] = {
@@ -783,17 +757,11 @@ public:
             // noised_input = noised_input * c_in
             ggml_ext_tensor_scale_inplace(noised_input, c_in);
 
-            std::vector<struct ggml_tensor*> controls;
-
             diffusion_params.x                  = noised_input;
             diffusion_params.timesteps          = timesteps;
             diffusion_params.guidance           = guidance_tensor;
             diffusion_params.ref_latents        = ref_latents;
             diffusion_params.increase_ref_index = increase_ref_index;
-            diffusion_params.controls           = controls;
-            diffusion_params.control_strength   = 0.0f;
-            diffusion_params.vace_context       = nullptr;
-            diffusion_params.vace_strength      = 1.f;
 
             const SDCondition* active_condition = nullptr;
             struct ggml_tensor** active_output  = &out_cond;
@@ -821,7 +789,6 @@ public:
             float* negative_data = nullptr;
             if (has_unconditioned) {
                 current_step_skipped      = cache_step_is_skipped();
-                diffusion_params.controls = controls;
                 diffusion_params.context  = uncond.c_crossattn;
                 diffusion_params.c_concat = uncond.c_concat;
                 diffusion_params.y        = uncond.c_vector;

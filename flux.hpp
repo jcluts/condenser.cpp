@@ -707,7 +707,7 @@ namespace Flux {
                    bool offload_params_to_cpu,
                    const String2TensorStorage& tensor_storage_map = {},
                    const std::string prefix                       = "",
-                   SDVersion version                              = VERSION_FLUX,
+                   SDVersion version                              = VERSION_FLUX2_KLEIN,
                    bool use_mask                                  = false)
             : GGMLRunner(backend, offload_params_to_cpu), version(version), use_mask(use_mask) {
             flux_params.version             = version;

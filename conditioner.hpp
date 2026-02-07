@@ -20,8 +20,7 @@ struct ConditionerParams {
     int height                          = -1;
     int adm_in_channels                 = -1;
     bool zero_out_masked                = false;
-    int num_input_imgs                  = 0;   // for photomaker
-    std::vector<sd_image_t*> ref_images = {};  // for qwen image edit
+    std::vector<sd_image_t*> ref_images = {};
 };
 
 struct Conditioner {
@@ -33,15 +32,6 @@ struct Conditioner {
     virtual void get_param_tensors(std::map<std::string, struct ggml_tensor*>& tensors)    = 0;
     virtual size_t get_params_buffer_size()                                                = 0;
     virtual void set_flash_attention_enabled(bool enabled)                                 = 0;
-    virtual std::tuple<SDCondition, std::vector<bool>> get_learned_condition_with_trigger(ggml_context* work_ctx,
-                                                                                          int n_threads,
-                                                                                          const ConditionerParams& conditioner_params) {
-        GGML_ABORT("Not implemented yet!");
-    }
-    virtual std::string remove_trigger_from_prompt(ggml_context* work_ctx,
-                                                   const std::string& prompt) {
-        GGML_ABORT("Not implemented yet!");
-    }
 };
 
 struct LLMEmbedder : public Conditioner {

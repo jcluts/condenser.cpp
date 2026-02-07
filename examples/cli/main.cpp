@@ -206,7 +206,7 @@ void parse_args(int argc, const char** argv, SDCliParams& cli_params, SDContextP
 }
 
 std::string get_image_params(const SDCliParams& cli_params, const SDContextParams& ctx_params, const SDGenerationParams& gen_params, int64_t seed) {
-    std::string parameter_string = gen_params.prompt_with_lora + "\n";
+    std::string parameter_string = gen_params.prompt + "\n";
     if (gen_params.negative_prompt.size() != 0) {
         parameter_string += "Negative prompt: " + gen_params.negative_prompt + "\n";
     }

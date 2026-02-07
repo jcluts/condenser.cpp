@@ -12,11 +12,6 @@ struct DiffusionParams {
     struct ggml_tensor* guidance              = nullptr;
     std::vector<ggml_tensor*> ref_latents     = {};
     bool increase_ref_index                   = false;
-    int num_video_frames                      = -1;
-    std::vector<struct ggml_tensor*> controls = {};
-    float control_strength                    = 0.f;
-    struct ggml_tensor* vace_context          = nullptr;
-    float vace_strength                       = 1.f;
     std::vector<int> skip_layers              = {};
 };
 
@@ -43,7 +38,7 @@ struct FluxModel : public DiffusionModel {
     FluxModel(ggml_backend_t backend,
               bool offload_params_to_cpu,
               const String2TensorStorage& tensor_storage_map = {},
-              SDVersion version                              = VERSION_FLUX,
+              SDVersion version                              = VERSION_FLUX2_KLEIN,
               bool use_mask                                  = false)
         : flux(backend, offload_params_to_cpu, tensor_storage_map, "model.diffusion_model", version, use_mask) {
     }
