@@ -65,10 +65,6 @@ __STATIC_INLINE__ int align_up_offset(int n, int multiple) {
     return (multiple - n % multiple) % multiple;
 }
 
-__STATIC_INLINE__ int align_up(int n, int multiple) {
-    return n + align_up_offset(n, multiple);
-}
-
 __STATIC_INLINE__ void ggml_log_callback_default(ggml_log_level level, const char* text, void*) {
     switch (level) {
         case GGML_LOG_LEVEL_DEBUG:
@@ -88,44 +84,6 @@ __STATIC_INLINE__ void ggml_log_callback_default(ggml_log_level level, const cha
     }
 }
 
-
-// n-mode tensor-matrix product
-// example: 2-mode product
-// A: [ne03, k, ne01, ne00]
-// B: k rows, m columns => [k, m]
-// result is [ne03, m, ne01, ne00]
-__STATIC_INLINE__ struct ggml_tensor* ggml_ext_mul_n_mode(struct ggml_context* ctx, struct ggml_tensor* a, struct ggml_tensor* b, int mode = 0) {
-    // reshape A
-    // swap 0th and nth axis
-    a           = ggml_cont(ctx, ggml_permute(ctx, a, mode, mode != 1 ? 1 : 0, mode != 2 ? 2 : 0, mode != 3 ? 3 : 0));
-    int64_t ne1 = a->ne[1];
-    int64_t ne2 = a->ne[2];
-    int64_t ne3 = a->ne[3];
-    // make 2D
-    a = ggml_cont(ctx, ggml_reshape_2d(ctx, a, a->ne[0], (ne3 * ne2 * ne1)));
-
-    struct ggml_tensor* result = ggml_cont(ctx, ggml_transpose(ctx, ggml_mul_mat(ctx, a, b)));
-
-    // reshape output (same shape as a after permutation except first dim)
-    result = ggml_reshape_4d(ctx, result, result->ne[0], ne1, ne2, ne3);
-    // swap back 0th and nth axis
-    result = ggml_permute(ctx, result, mode, mode != 1 ? 1 : 0, mode != 2 ? 2 : 0, mode != 3 ? 3 : 0);
-    return result;
-}
-
-// Kronecker product
-// [ne03,ne02,ne01,ne00] x [ne13,ne12,ne11,ne10] => [ne03*ne13,ne02*ne12,ne01*ne11,ne00*ne10]
-__STATIC_INLINE__ struct ggml_tensor* ggml_ext_kronecker(ggml_context* ctx, struct ggml_tensor* a, struct ggml_tensor* b) {
-    return ggml_mul(ctx,
-                    ggml_interpolate(ctx,
-                                     a,
-                                     a->ne[0] * b->ne[0],
-                                     a->ne[1] * b->ne[1],
-                                     a->ne[2] * b->ne[2],
-                                     a->ne[3] * b->ne[3],
-                                     GGML_SCALE_MODE_NEAREST),
-                    b);
-}
 
 __STATIC_INLINE__ void ggml_ext_im_set_randn_f32(struct ggml_tensor* tensor, std::shared_ptr<RNG> rng) {
     uint32_t n                        = (uint32_t)ggml_nelements(tensor);
@@ -250,56 +208,6 @@ __STATIC_INLINE__ void ggml_ext_tensor_iter(
     }
 }
 
-__STATIC_INLINE__ void ggml_ext_tensor_diff(
-    ggml_tensor* a,
-    ggml_tensor* b,
-    float gap = 0.1f) {
-    GGML_ASSERT(ggml_nelements(a) == ggml_nelements(b));
-    ggml_ext_tensor_iter(a, [&](ggml_tensor* a, int64_t i0, int64_t i1, int64_t i2, int64_t i3) {
-        float a_value = ggml_ext_tensor_get_f32(a, i0, i1, i2, i3);
-        float b_value = ggml_ext_tensor_get_f32(b, i0, i1, i2, i3);
-        if (abs(a_value - b_value) > gap) {
-            LOG_WARN("[%ld, %ld, %ld, %ld] %f %f", i3, i2, i1, i0, a_value, b_value);
-        }
-    });
-}
-
-__STATIC_INLINE__ ggml_tensor* load_tensor_from_file(ggml_context* ctx, const std::string& file_path) {
-    std::ifstream file(file_path, std::ios::binary);
-    if (!file.is_open()) {
-        LOG_ERROR("failed to open '%s'", file_path.c_str());
-        return nullptr;
-    }
-    int32_t n_dims;
-    int32_t length;
-    int32_t ttype;
-
-    file.read(reinterpret_cast<char*>(&n_dims), sizeof(n_dims));
-    file.read(reinterpret_cast<char*>(&length), sizeof(length));
-    file.read(reinterpret_cast<char*>(&ttype), sizeof(ttype));
-
-    LOG_DEBUG("load_tensor_from_file %d %d %d", n_dims, length, ttype);
-
-    if (file.eof()) {
-        LOG_ERROR("incomplete file '%s'", file_path.c_str());
-        return nullptr;
-    }
-
-    int32_t nelements = 1;
-    int32_t ne[4]     = {1, 1, 1, 1};
-    for (int i = 0; i < n_dims; ++i) {
-        file.read(reinterpret_cast<char*>(&ne[i]), sizeof(ne[i]));
-        nelements *= ne[i];
-    }
-    std::string name(length, 0);
-    file.read(&name[0], length);
-    ggml_tensor* tensor = ggml_new_tensor_4d(ctx, (ggml_type)ttype, ne[0], ne[1], ne[2], ne[3]);
-    const size_t bpe    = ggml_type_size(ggml_type(ttype));
-    file.read(reinterpret_cast<char*>(tensor->data), ggml_nbytes(tensor));
-    return tensor;
-}
-
-
 __STATIC_INLINE__ void copy_ggml_tensor(struct ggml_tensor* dst, struct ggml_tensor* src) {
     if (dst->type == src->type) {
         dst->nb[0] = src->nb[0];
@@ -391,32 +299,6 @@ __STATIC_INLINE__ void sd_image_to_ggml_tensor(sd_image_t image,
         float value = sd_image_get_f32(image, i0, i1, i2, scale);
         ggml_ext_tensor_set_f32(tensor, value, i0, i1, i2, i3);
     });
-}
-
-__STATIC_INLINE__ void ggml_ext_tensor_apply_mask(struct ggml_tensor* image_data,
-                                                  struct ggml_tensor* mask,
-                                                  struct ggml_tensor* output,
-                                                  float masked_value = 0.5f) {
-    int64_t width    = output->ne[0];
-    int64_t height   = output->ne[1];
-    int64_t channels = output->ne[2];
-    float rescale_mx = 1.f * mask->ne[0] / output->ne[0];
-    float rescale_my = 1.f * mask->ne[1] / output->ne[1];
-    GGML_ASSERT(output->type == GGML_TYPE_F32);
-    for (int ix = 0; ix < width; ix++) {
-        for (int iy = 0; iy < height; iy++) {
-            int mx  = (int)(ix * rescale_mx);
-            int my  = (int)(iy * rescale_my);
-            float m = ggml_ext_tensor_get_f32(mask, mx, my);
-            m       = round(m);  // inpaint models need binary masks
-            ggml_ext_tensor_set_f32(mask, m, mx, my);
-            for (int k = 0; k < channels; k++) {
-                float value = ggml_ext_tensor_get_f32(image_data, ix, iy, k);
-                value       = (1 - m) * (value - masked_value) + masked_value;
-                ggml_ext_tensor_set_f32(output, value, ix, iy, k);
-            }
-        }
-    }
 }
 
 __STATIC_INLINE__ void sd_image_f32_to_ggml_tensor(sd_image_f32_t image,
@@ -544,42 +426,6 @@ __STATIC_INLINE__ void ggml_ext_tensor_clamp_inplace(struct ggml_tensor* src, fl
     }
 }
 
-__STATIC_INLINE__ struct ggml_tensor* ggml_ext_tensor_concat(struct ggml_context* ctx,
-                                                             struct ggml_tensor* a,
-                                                             struct ggml_tensor* b,
-                                                             int dim) {
-    int64_t ne[GGML_MAX_DIMS];
-    for (int d = 0; d < GGML_MAX_DIMS; ++d) {
-        if (d == dim) {
-            ne[d] = a->ne[d] + b->ne[d];
-            continue;
-        }
-        GGML_ASSERT(a->ne[d] == b->ne[d]);
-        ne[d] = a->ne[d];
-    }
-    struct ggml_tensor* result = ggml_new_tensor(ctx, a->type, GGML_MAX_DIMS, ne);
-    int64_t o[4]               = {0, 0, 0, 0};
-    o[dim]                     = a->ne[dim];
-
-    float v;
-    for (int i3 = 0; i3 < result->ne[3]; i3++) {
-        for (int i2 = 0; i2 < result->ne[2]; i2++) {
-            for (int i1 = 0; i1 < result->ne[1]; i1++) {
-                for (int i0 = 0; i0 < result->ne[0]; i0++) {
-                    if (i0 < a->ne[0] && i1 < a->ne[1] && i2 < a->ne[2] && i3 < a->ne[3]) {
-                        v = ggml_ext_tensor_get_f32(a, i0, i1, i2, i3);
-                    } else {
-                        v = ggml_ext_tensor_get_f32(b, i0 - o[0], i1 - o[1], i2 - o[2], i3 - o[3]);
-                    }
-
-                    ggml_ext_tensor_set_f32(result, v, i0, i1, i2, i3);
-                }
-            }
-        }
-    }
-    return result;
-}
-
 // convert values from [0, 1] to [-1, 1]
 __STATIC_INLINE__ void process_vae_input_tensor(struct ggml_tensor* src) {
     int64_t nelements = ggml_nelements(src);
@@ -631,41 +477,6 @@ __STATIC_INLINE__ struct ggml_tensor* ggml_ext_torch_permute(struct ggml_context
     }
 
     return ggml_permute(ctx, x, ggml_axes[0], ggml_axes[1], ggml_axes[2], ggml_axes[3]);
-}
-
-__STATIC_INLINE__ struct ggml_tensor* ggml_ext_slice(struct ggml_context* ctx,
-                                                     struct ggml_tensor* x,
-                                                     int dim,
-                                                     int64_t start,
-                                                     int64_t end,
-                                                     bool cont = true) {
-    GGML_ASSERT(dim >= 0 && dim < 4);
-    if (x->ne[dim] == 1) {
-        return x;
-    }
-    while (start < 0) {
-        start = x->ne[dim] + start;
-    }
-    while (end < 0) {
-        end = x->ne[dim] + end;
-    }
-    GGML_ASSERT(end > start);
-    GGML_ASSERT(start >= 0 && start < x->ne[dim]);
-    GGML_ASSERT(end > start && end <= x->ne[dim]);
-
-    int64_t slice_size  = end - start;
-    int64_t slice_ne[4] = {x->ne[0], x->ne[1], x->ne[2], x->ne[3]};
-    slice_ne[dim]       = slice_size;
-
-    x = ggml_view_4d(ctx, x,
-                     slice_ne[0], slice_ne[1], slice_ne[2], slice_ne[3],
-                     x->nb[1], x->nb[2], x->nb[3], start * x->nb[dim]);
-
-    if (cont) {
-        x = ggml_cont(ctx, x);
-    }
-
-    return x;
 }
 
 // example: [N, 3*C, H, W] => ([N, C, H, W], [N, C, H, W], [N, C, H, W])
@@ -932,20 +743,6 @@ __STATIC_INLINE__ struct ggml_tensor* ggml_ext_gelu(struct ggml_context* ctx,
     return x;
 }
 
-__STATIC_INLINE__ struct ggml_tensor* ggml_ext_gelu_quick(struct ggml_context* ctx,
-                                                          struct ggml_tensor* x,
-                                                          bool inplace = false) {
-    if (!ggml_is_contiguous(x)) {
-        x = ggml_cont(ctx, x);
-    }
-    if (inplace) {
-        x = ggml_gelu_quick_inplace(ctx, x);
-    } else {
-        x = ggml_gelu_quick(ctx, x);
-    }
-    return x;
-}
-
 __STATIC_INLINE__ struct ggml_tensor* ggml_ext_linear(struct ggml_context* ctx,
                                                       struct ggml_tensor* x,
                                                       struct ggml_tensor* w,
@@ -1068,88 +865,6 @@ __STATIC_INLINE__ struct ggml_tensor* ggml_ext_conv_2d(struct ggml_context* ctx,
     return x;
 }
 
-// w: [OC，IC, KD, 1 * 1]
-// x: [N, IC, IH, IW]
-// b: [OC,]
-// result: [N*OC, OD, OH, OW]
-__STATIC_INLINE__ struct ggml_tensor* ggml_ext_conv_3d(struct ggml_context* ctx,
-                                                       struct ggml_tensor* x,
-                                                       struct ggml_tensor* w,
-                                                       struct ggml_tensor* b,
-                                                       int64_t IC,
-                                                       int s0 = 1,
-                                                       int s1 = 1,
-                                                       int s2 = 1,
-                                                       int p0 = 0,
-                                                       int p1 = 0,
-                                                       int p2 = 0,
-                                                       int d0 = 1,
-                                                       int d1 = 1,
-                                                       int d2 = 1) {
-    int64_t OC = w->ne[3] / IC;
-    int64_t N  = x->ne[3] / IC;
-    x          = ggml_conv_3d(ctx, w, x, IC, s0, s1, s2, p0, p1, p2, d0, d1, d2);
-
-    if (b != nullptr) {
-        b = ggml_reshape_4d(ctx, b, 1, 1, 1, b->ne[0]);  // [OC, 1, 1, 1]
-        x = ggml_add_inplace(ctx, x, b);
-    }
-    return x;
-}
-
-// w: [OC，IC, KD, 1 * 1]
-// x: [N, IC, ID, IH*IW]
-// b: [OC,]
-// result: [N, OC, OD, OH*OW]
-__STATIC_INLINE__ struct ggml_tensor* ggml_ext_conv_3d_nx1x1(struct ggml_context* ctx,
-                                                             struct ggml_tensor* x,
-                                                             struct ggml_tensor* w,
-                                                             struct ggml_tensor* b,
-                                                             int s2 = 1,
-                                                             int p2 = 1,
-                                                             int d2 = 1) {
-    x = ggml_conv_2d(ctx, w, x, 1, s2, 0, p2, 1, d2);  // [N, OC, T, OH * OW]
-    if (b != nullptr) {
-        b = ggml_reshape_4d(ctx, b, 1, 1, b->ne[0], 1);
-        x = ggml_add(ctx, x, b);
-    }
-    return x;  // [N, OC, T, OH * OW]
-}
-
-// qkv: [N, L, 3*C]
-// return: ([N, L, C], [N, L, C], [N, L, C])
-__STATIC_INLINE__ std::vector<struct ggml_tensor*> split_qkv(struct ggml_context* ctx,
-                                                             struct ggml_tensor* qkv) {
-    qkv = ggml_reshape_4d(ctx, qkv, qkv->ne[0] / 3, 3, qkv->ne[1], qkv->ne[2]);  // [N, L, 3, C]
-    qkv = ggml_cont(ctx, ggml_permute(ctx, qkv, 0, 3, 1, 2));                    // [3, N, L, C]
-
-    int64_t offset = qkv->nb[2] * qkv->ne[2];
-    auto q         = ggml_view_3d(ctx, qkv, qkv->ne[0], qkv->ne[1], qkv->ne[2], qkv->nb[1], qkv->nb[2], offset * 0);  // [N, L, C]
-    auto k         = ggml_view_3d(ctx, qkv, qkv->ne[0], qkv->ne[1], qkv->ne[2], qkv->nb[1], qkv->nb[2], offset * 1);  // [N, L, C]
-    auto v         = ggml_view_3d(ctx, qkv, qkv->ne[0], qkv->ne[1], qkv->ne[2], qkv->nb[1], qkv->nb[2], offset * 2);  // [N, L, C]
-    return {q, k, v};
-}
-
-// qkv: [N, 3*C, H, W]
-// return: ([N, C, H, W], [N, C, H, W], [N, C, H, W])
-__STATIC_INLINE__ std::vector<struct ggml_tensor*> split_image_qkv(struct ggml_context* ctx,
-                                                                   struct ggml_tensor* qkv) {
-    int64_t W   = qkv->ne[0];
-    int64_t H   = qkv->ne[1];
-    int64_t C   = qkv->ne[2] / 3;
-    int64_t N   = qkv->ne[3];
-    int64_t nb1 = qkv->nb[1];
-    int64_t nb2 = qkv->nb[2];
-    qkv         = ggml_reshape_4d(ctx, qkv, W * H, C, 3, N);                     // [N, 3, C, H*W]
-    qkv         = ggml_cont(ctx, ggml_ext_torch_permute(ctx, qkv, 0, 1, 3, 2));  // [3, N, C, H*W]
-
-    int64_t offset = qkv->nb[2] * qkv->ne[2];
-    auto q         = ggml_view_4d(ctx, qkv, W, H, C, N, nb1, nb2, qkv->nb[3], offset * 0);  // [N, C, H, W]
-    auto k         = ggml_view_4d(ctx, qkv, W, H, C, N, nb1, nb2, qkv->nb[3], offset * 1);  // [N, C, H, W]
-    auto v         = ggml_view_4d(ctx, qkv, W, H, C, N, nb1, nb2, qkv->nb[3], offset * 2);  // [N, C, H, W]
-    return {q, k, v};
-}
-
 __STATIC_INLINE__ struct ggml_tensor* ggml_ext_full(struct ggml_context* ctx,
                                                     float value,
                                                     int64_t ne0,
@@ -1168,35 +883,6 @@ __STATIC_INLINE__ struct ggml_tensor* ggml_ext_zeros(struct ggml_context* ctx,
                                                      int64_t ne2,
                                                      int64_t ne3) {
     return ggml_ext_full(ctx, 0.f, ne0, ne1, ne2, ne3);
-}
-
-__STATIC_INLINE__ struct ggml_tensor* ggml_ext_ones(struct ggml_context* ctx,
-                                                    int64_t ne0,
-                                                    int64_t ne1,
-                                                    int64_t ne2,
-                                                    int64_t ne3) {
-    return ggml_ext_full(ctx, 1.f, ne0, ne1, ne2, ne3);
-}
-
-__STATIC_INLINE__ ggml_tensor* ggml_ext_cast_f32(ggml_context* ctx, ggml_tensor* a) {
-#ifdef SD_USE_VULKAN
-    auto zero_index = ggml_get_tensor(ctx, "ggml_runner_build_in_tensor:zero_int");
-    auto out        = ggml_reshape_1d(ctx, a, ggml_nelements(a));
-    out             = ggml_get_rows(ctx, out, zero_index);
-    out             = ggml_reshape(ctx, out, a);
-    // auto out = ggml_cast(ctx, a, GGML_TYPE_F32);
-    return out;
-#else
-    auto out         = ggml_reshape_2d(ctx, a, 1, ggml_nelements(a));
-    ggml_tensor* one = ggml_ext_ones(ctx, 1, 1, 1, 1);  // [1,]
-    if (ggml_is_transposed(out)) {
-        out = ggml_mul_mat(ctx, one, out);
-    } else {
-        out = ggml_mul_mat(ctx, out, one);
-    }
-    out = ggml_reshape(ctx, out, a);
-#endif
-    return out;
 }
 
 // q: [N, L_q, C(n_head*d_head)] or [N*n_head, L_q, d_head]
@@ -1433,70 +1119,6 @@ __STATIC_INLINE__ struct ggml_tensor* vector_to_ggml_tensor_i32(struct ggml_cont
     struct ggml_tensor* t = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, vec.size());
     memcpy(t->data, (const void*)vec.data(), ggml_nbytes(t));
     return t;
-}
-
-__STATIC_INLINE__ std::vector<float> arange(float start, float end, float step = 1.f) {
-    std::vector<float> result;
-
-    for (float value = start; value < end; value += step) {
-        result.push_back(value);
-    }
-
-    return result;
-}
-
-// Ref: https://github.com/CompVis/stable-diffusion/blob/main/ldm/modules/diffusionmodules/util.py#L151
-__STATIC_INLINE__ std::vector<float> timestep_embedding(std::vector<float> timesteps,
-                                                        int dim,
-                                                        int max_period       = 10000,
-                                                        bool flip_sin_to_cos = true,
-                                                        float scale          = 1.f) {
-    // timesteps: [N,]
-    // embedding: [N, dim]
-    size_t N = timesteps.size();
-    std::vector<float> embedding(N * dim, 0.f);
-    int half = dim / 2;
-    std::vector<float> freqs(half);
-    for (int i = 0; i < half; ++i) {
-        freqs[i] = (float)std::exp(-std::log(max_period) * i / half);
-    }
-    for (int i = 0; i < N; ++i) {
-        for (int j = 0; j < half; ++j) {
-            float arg = timesteps[i] * freqs[j] * scale;
-            if (flip_sin_to_cos) {
-                embedding[i * dim + j]        = std::cos(arg);
-                embedding[i * dim + j + half] = std::sin(arg);
-            } else {
-                embedding[i * dim + j]        = std::sin(arg);
-                embedding[i * dim + j + half] = std::cos(arg);
-            }
-        }
-    }
-    return embedding;
-}
-
-__STATIC_INLINE__ void set_timestep_embedding(std::vector<float> timesteps,
-                                              struct ggml_tensor* embedding,
-                                              int dim,
-                                              int max_period = 10000) {
-    std::vector<float> embedding_vec = timestep_embedding(timesteps, dim, max_period);
-    memcpy(((char*)embedding->data), ((char*)embedding_vec.data()), ggml_nbytes(embedding));
-}
-
-__STATIC_INLINE__ struct ggml_tensor* new_timestep_embedding(struct ggml_context* ctx,
-                                                             std::vector<float> timesteps,
-                                                             int dim,
-                                                             int max_period = 10000) {
-    // timesteps: [N,]
-    // embedding: [N, dim]
-    std::vector<float> embedding_vec = timestep_embedding(timesteps, dim, max_period);
-    struct ggml_tensor* embedding    = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, dim, timesteps.size());
-    if (embedding->data != nullptr) {
-        memcpy(((char*)embedding->data), ((char*)embedding_vec.data()), ggml_nbytes(embedding));
-    } else {
-        ggml_backend_tensor_set(embedding, embedding_vec.data(), 0, ggml_nbytes(embedding));
-    }
-    return embedding;
 }
 
 __STATIC_INLINE__ struct ggml_tensor* ggml_ext_timestep_embedding(
@@ -2086,13 +1708,6 @@ public:
     virtual struct ggml_tensor* forward(GGMLRunnerContext* ctx, struct ggml_tensor* x) = 0;
 };
 
-class Identity : public UnaryBlock {
-public:
-    struct ggml_tensor* forward(GGMLRunnerContext* ctx, struct ggml_tensor* x) {
-        return x;
-    }
-};
-
 class Linear : public UnaryBlock {
 protected:
     int64_t in_features;
@@ -2256,60 +1871,6 @@ public:
     }
 };
 
-class Conv3d : public UnaryBlock {
-protected:
-    int64_t in_channels;
-    int64_t out_channels;
-    std::tuple<int, int, int> kernel_size;
-    std::tuple<int, int, int> stride;
-    std::tuple<int, int, int> padding;
-    std::tuple<int, int, int> dilation;
-    bool bias;
-    std::string prefix;
-
-    void init_params(struct ggml_context* ctx, const String2TensorStorage& tensor_storage_map, const std::string prefix = "") override {
-        this->prefix         = prefix;
-        enum ggml_type wtype = GGML_TYPE_F16;
-        params["weight"]     = ggml_new_tensor_4d(ctx,
-                                                  wtype,
-                                                  std::get<2>(kernel_size),
-                                                  std::get<1>(kernel_size),
-                                                  std::get<0>(kernel_size),
-                                                  in_channels * out_channels);
-        if (bias) {
-            params["bias"] = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, out_channels);
-        }
-    }
-
-public:
-    Conv3d(int64_t in_channels,
-           int64_t out_channels,
-           std::tuple<int, int, int> kernel_size,
-           std::tuple<int, int, int> stride   = {1, 1, 1},
-           std::tuple<int, int, int> padding  = {0, 0, 0},
-           std::tuple<int, int, int> dilation = {1, 1, 1},
-           bool bias                          = true)
-        : in_channels(in_channels),
-          out_channels(out_channels),
-          kernel_size(kernel_size),
-          stride(stride),
-          padding(padding),
-          dilation(dilation),
-          bias(bias) {}
-
-    struct ggml_tensor* forward(GGMLRunnerContext* ctx, struct ggml_tensor* x) {
-        struct ggml_tensor* w = params["weight"];
-        struct ggml_tensor* b = nullptr;
-        if (bias) {
-            b = params["bias"];
-        }
-        return ggml_ext_conv_3d(ctx->ggml_ctx, x, w, b, in_channels,
-                                std::get<2>(stride), std::get<1>(stride), std::get<0>(stride),
-                                std::get<2>(padding), std::get<1>(padding), std::get<0>(padding),
-                                std::get<2>(dilation), std::get<1>(dilation), std::get<0>(dilation));
-    }
-};
-
 class LayerNorm : public UnaryBlock {
 protected:
     int64_t normalized_shape;
@@ -2422,79 +1983,6 @@ public:
 
         x = ggml_rms_norm(ctx->ggml_ctx, x, eps);
         x = ggml_mul_inplace(ctx->ggml_ctx, x, w);
-        return x;
-    }
-};
-
-class MultiheadAttention : public GGMLBlock {
-protected:
-    int64_t embed_dim;
-    int64_t n_head;
-    bool proj_in;
-    std::string q_proj_name;
-    std::string k_proj_name;
-    std::string v_proj_name;
-    std::string in_proj_name;
-    std::string out_proj_name;
-
-public:
-    MultiheadAttention(int64_t embed_dim,
-                       int64_t n_head,
-                       bool qkv_proj_bias        = true,
-                       bool out_proj_bias        = true,
-                       bool proj_in              = false,
-                       std::string q_proj_name   = "q_proj",
-                       std::string k_proj_name   = "k_proj",
-                       std::string v_proj_name   = "v_proj",
-                       std::string in_proj_name  = "in_proj",
-                       std::string out_proj_name = "out_proj")
-        : embed_dim(embed_dim),
-          n_head(n_head),
-          proj_in(proj_in),
-          q_proj_name(q_proj_name),
-          k_proj_name(k_proj_name),
-          v_proj_name(v_proj_name),
-          in_proj_name(in_proj_name),
-          out_proj_name(out_proj_name) {
-        if (proj_in) {
-            blocks[in_proj_name] = std::shared_ptr<GGMLBlock>(new Linear(embed_dim, embed_dim * 3, qkv_proj_bias));
-        } else {
-            blocks[q_proj_name] = std::shared_ptr<GGMLBlock>(new Linear(embed_dim, embed_dim, qkv_proj_bias));
-            blocks[k_proj_name] = std::shared_ptr<GGMLBlock>(new Linear(embed_dim, embed_dim, qkv_proj_bias));
-            blocks[v_proj_name] = std::shared_ptr<GGMLBlock>(new Linear(embed_dim, embed_dim, qkv_proj_bias));
-        }
-        blocks[out_proj_name] = std::shared_ptr<GGMLBlock>(new Linear(embed_dim, embed_dim, out_proj_bias));
-    }
-
-    // x: [N, n_token, embed_dim]
-    struct ggml_tensor* forward(GGMLRunnerContext* ctx,
-                                struct ggml_tensor* x,
-                                struct ggml_tensor* mask = nullptr) {
-        auto out_proj = std::dynamic_pointer_cast<Linear>(blocks[out_proj_name]);
-
-        ggml_tensor* q;
-        ggml_tensor* k;
-        ggml_tensor* v;
-        if (proj_in) {
-            auto in_proj = std::dynamic_pointer_cast<Linear>(blocks[in_proj_name]);
-            auto qkv     = in_proj->forward(ctx, x);
-            auto qkv_vec = split_qkv(ctx->ggml_ctx, qkv);
-            q            = qkv_vec[0];
-            k            = qkv_vec[1];
-            v            = qkv_vec[2];
-        } else {
-            auto q_proj = std::dynamic_pointer_cast<Linear>(blocks[q_proj_name]);
-            auto k_proj = std::dynamic_pointer_cast<Linear>(blocks[k_proj_name]);
-            auto v_proj = std::dynamic_pointer_cast<Linear>(blocks[v_proj_name]);
-
-            q = q_proj->forward(ctx, x);
-            k = k_proj->forward(ctx, x);
-            v = v_proj->forward(ctx, x);
-        }
-
-        x = ggml_ext_attention_ext(ctx->ggml_ctx, ctx->backend, q, k, v, n_head, mask, false);  // [N, n_token, embed_dim]
-
-        x = out_proj->forward(ctx, x);  // [N, n_token, embed_dim]
         return x;
     }
 };
