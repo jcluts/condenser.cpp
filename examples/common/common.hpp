@@ -804,7 +804,6 @@ struct SDGenerationParams {
     int batch_count = 1;
     std::string init_image_path;
     std::vector<std::string> ref_image_paths;
-    bool auto_resize_ref_image = true;
     bool increase_ref_index    = false;
 
     sd_sample_params_t sample_params;
@@ -880,11 +879,6 @@ struct SDGenerationParams {
              "automatically increase the indices of references images based on the order they are listed (starting with 1).",
              true,
              &increase_ref_index},
-            {"",
-             "--disable-auto-resize-ref-image",
-             "disable auto resize of ref images",
-             false,
-             &auto_resize_ref_image},
         };
 
         auto on_seed_arg = [&](int argc, const char** argv, int index) {
@@ -1121,7 +1115,6 @@ struct SDGenerationParams {
         load_if_exists("upscale_repeats", upscale_repeats);
         load_if_exists("seed", seed);
 
-        load_if_exists("auto_resize_ref_image", auto_resize_ref_image);
         load_if_exists("increase_ref_index", increase_ref_index);
 
         load_if_exists("steps", sample_params.sample_steps);
@@ -1312,7 +1305,6 @@ struct SDGenerationParams {
             << "  batch_count: " << batch_count << ",\n"
             << "  init_image_path: \"" << init_image_path << "\",\n"
             << "  ref_image_paths: " << vec_str_to_string(ref_image_paths) << ",\n"
-            << "  auto_resize_ref_image: " << (auto_resize_ref_image ? "true" : "false") << ",\n"
             << "  increase_ref_index: " << (increase_ref_index ? "true" : "false") << ",\n"
             << "  sample_params: " << sample_params_str << ",\n"
             << "  custom_sigmas: " << vec_to_string(custom_sigmas) << ",\n"

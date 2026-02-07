@@ -212,7 +212,6 @@ typedef struct {
     const char* prompt;
     sd_image_t* ref_images;
     int ref_images_count;
-    bool auto_resize_ref_image;
     bool increase_ref_index;
     int width;
     int height;

@@ -1398,7 +1398,6 @@ char* sd_img_gen_params_to_str(const sd_img_gen_params_t* sd_img_gen_params) {
              "\n"
              "batch_count: %d\n"
              "ref_images_count: %d\n"
-             "auto_resize_ref_image: %s\n"
              "increase_ref_index: %s\n"
              "VAE tiling: %s\n",
              SAFE_STR(sd_img_gen_params->prompt),
@@ -1408,7 +1407,6 @@ char* sd_img_gen_params_to_str(const sd_img_gen_params_t* sd_img_gen_params) {
              sd_img_gen_params->seed,
              sd_img_gen_params->batch_count,
              sd_img_gen_params->ref_images_count,
-             BOOL_STR(sd_img_gen_params->auto_resize_ref_image),
              BOOL_STR(sd_img_gen_params->increase_ref_index),
              BOOL_STR(sd_img_gen_params->vae_tiling_params.enabled));
     const char* cache_mode_str = "disabled";
@@ -1701,43 +1699,13 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
 
     std::vector<ggml_tensor*> ref_latents;
     for (int i = 0; i < ref_images.size(); i++) {
-        ggml_tensor* img;
-        if (sd_img_gen_params->auto_resize_ref_image) {
-            LOG_DEBUG("auto resize ref images");
-            sd_image_f32_t ref_image = sd_image_t_to_sd_image_f32_t(*ref_images[i]);
-            int VAE_IMAGE_SIZE       = std::min(1024 * 1024, width * height);
-            double vae_width         = sqrt(VAE_IMAGE_SIZE * ref_image.width / ref_image.height);
-            double vae_height        = vae_width * ref_image.height / ref_image.width;
-
-            int factor = 16;
-
-            vae_height = round(vae_height / factor) * factor;
-            vae_width  = round(vae_width / factor) * factor;
-
-            sd_image_f32_t resized_image = resize_sd_image_f32_t(ref_image, static_cast<int>(vae_width), static_cast<int>(vae_height));
-            free(ref_image.data);
-            ref_image.data = nullptr;
-
-            LOG_DEBUG("resize vae ref image %d from %dx%d to %dx%d", i, ref_image.height, ref_image.width, resized_image.height, resized_image.width);
-
-            img = ggml_new_tensor_4d(work_ctx,
-                                     GGML_TYPE_F32,
-                                     resized_image.width,
-                                     resized_image.height,
-                                     3,
-                                     1);
-            sd_image_f32_to_ggml_tensor(resized_image, img);
-            free(resized_image.data);
-            resized_image.data = nullptr;
-        } else {
-            img = ggml_new_tensor_4d(work_ctx,
-                                     GGML_TYPE_F32,
-                                     ref_images[i]->width,
-                                     ref_images[i]->height,
-                                     3,
-                                     1);
-            sd_image_to_ggml_tensor(*ref_images[i], img);
-        }
+        ggml_tensor* img = ggml_new_tensor_4d(work_ctx,
+                                              GGML_TYPE_F32,
+                                              ref_images[i]->width,
+                                              ref_images[i]->height,
+                                              3,
+                                              1);
+        sd_image_to_ggml_tensor(*ref_images[i], img);
 
         // print_ggml_tensor(img, false, "img");
 

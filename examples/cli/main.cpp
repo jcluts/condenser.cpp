@@ -552,7 +552,6 @@ int main(int argc, const char* argv[]) {
             img_gen_params.prompt                = gen_params.prompt.c_str();
             img_gen_params.ref_images             = ref_images.data();
             img_gen_params.ref_images_count       = (int)ref_images.size();
-            img_gen_params.auto_resize_ref_image  = gen_params.auto_resize_ref_image;
             img_gen_params.increase_ref_index     = gen_params.increase_ref_index;
             img_gen_params.width                  = gen_params.get_resolved_width();
             img_gen_params.height                 = gen_params.get_resolved_height();
