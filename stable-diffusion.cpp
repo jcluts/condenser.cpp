@@ -943,16 +943,24 @@ public:
         std::vector<float> latents_std_vec;
         get_latents_mean_std_vec(latent, 2, latents_mean_vec, latents_std_vec);
 
-        for (int i = 0; i < latent->ne[3]; i++) {
-            for (int j = 0; j < latent->ne[2]; j++) {
-                float mean = latents_mean_vec[j];
-                float std_ = latents_std_vec[j];
-                for (int k = 0; k < latent->ne[1]; k++) {
-                    for (int l = 0; l < latent->ne[0]; l++) {
-                        float value = ggml_ext_tensor_get_f32(latent, l, k, j, i);
-                        value       = (value - mean) * scale_factor / std_;
-                        ggml_ext_tensor_set_f32(latent, value, l, k, j, i);
-                    }
+        GGML_ASSERT(latent->type == GGML_TYPE_F32);
+        GGML_ASSERT(latent->buffer == nullptr);
+        int64_t W  = latent->ne[0];
+        int64_t H  = latent->ne[1];
+        int64_t C  = latent->ne[2];
+        int64_t B  = latent->ne[3];
+        int64_t stride2 = latent->nb[2] / sizeof(float);
+        int64_t stride3 = latent->nb[3] / sizeof(float);
+        float* data = (float*)latent->data;
+
+        for (int i = 0; i < B; i++) {
+            for (int j = 0; j < C; j++) {
+                float mean           = latents_mean_vec[j];
+                float inv_std_scaled = scale_factor / latents_std_vec[j];
+                float* channel_data  = data + i * stride3 + j * stride2;
+                int64_t hw           = H * W;
+                for (int64_t idx = 0; idx < hw; idx++) {
+                    channel_data[idx] = (channel_data[idx] - mean) * inv_std_scaled;
                 }
             }
         }
@@ -964,16 +972,24 @@ public:
         std::vector<float> latents_std_vec;
         get_latents_mean_std_vec(latent, 2, latents_mean_vec, latents_std_vec);
 
-        for (int i = 0; i < latent->ne[3]; i++) {
-            for (int j = 0; j < latent->ne[2]; j++) {
-                float mean = latents_mean_vec[j];
-                float std_ = latents_std_vec[j];
-                for (int k = 0; k < latent->ne[1]; k++) {
-                    for (int l = 0; l < latent->ne[0]; l++) {
-                        float value = ggml_ext_tensor_get_f32(latent, l, k, j, i);
-                        value       = value * std_ / scale_factor + mean;
-                        ggml_ext_tensor_set_f32(latent, value, l, k, j, i);
-                    }
+        GGML_ASSERT(latent->type == GGML_TYPE_F32);
+        GGML_ASSERT(latent->buffer == nullptr);
+        int64_t W  = latent->ne[0];
+        int64_t H  = latent->ne[1];
+        int64_t C  = latent->ne[2];
+        int64_t B  = latent->ne[3];
+        int64_t stride2 = latent->nb[2] / sizeof(float);
+        int64_t stride3 = latent->nb[3] / sizeof(float);
+        float* data = (float*)latent->data;
+
+        for (int i = 0; i < B; i++) {
+            for (int j = 0; j < C; j++) {
+                float mean          = latents_mean_vec[j];
+                float std_inv_scale = latents_std_vec[j] / scale_factor;
+                float* channel_data = data + i * stride3 + j * stride2;
+                int64_t hw          = H * W;
+                for (int64_t idx = 0; idx < hw; idx++) {
+                    channel_data[idx] = channel_data[idx] * std_inv_scale + mean;
                 }
             }
         }

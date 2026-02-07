@@ -88,8 +88,12 @@ __STATIC_INLINE__ void ggml_log_callback_default(ggml_log_level level, const cha
 __STATIC_INLINE__ void ggml_ext_im_set_randn_f32(struct ggml_tensor* tensor, std::shared_ptr<RNG> rng) {
     uint32_t n                        = (uint32_t)ggml_nelements(tensor);
     std::vector<float> random_numbers = rng->randn(n);
-    for (uint32_t i = 0; i < n; i++) {
-        ggml_set_f32_1d(tensor, i, random_numbers[i]);
+    if (tensor->type == GGML_TYPE_F32 && ggml_is_contiguous(tensor) && tensor->buffer == nullptr) {
+        memcpy(tensor->data, random_numbers.data(), n * sizeof(float));
+    } else {
+        for (uint32_t i = 0; i < n; i++) {
+            ggml_set_f32_1d(tensor, i, random_numbers[i]);
+        }
     }
 }
 
