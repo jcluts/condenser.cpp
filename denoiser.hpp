@@ -19,9 +19,8 @@ struct Denoiser {
     virtual ggml_tensor* noise_scaling(float sigma, ggml_tensor* noise, ggml_tensor* latent) = 0;
     virtual ggml_tensor* inverse_noise_scaling(float sigma, ggml_tensor* latent)             = 0;
 
-    // Flux 2 Klein overrides this entirely with its own empirical mu-shifted schedule.
-    // The scheduler_t parameter is accepted for API compatibility but ignored.
-    virtual std::vector<float> get_sigmas(uint32_t n, int image_seq_len, scheduler_t scheduler_type, SDVersion version) = 0;
+    // Flux 2 Klein uses its own empirical mu-shifted schedule.
+    virtual std::vector<float> get_sigmas(uint32_t n, int image_seq_len, SDVersion version) = 0;
 };
 
 float flux_time_shift(float mu, float sigma, float t) {
@@ -99,7 +98,7 @@ struct Flux2FlowDenoiser : public FluxFlowDenoiser {
         return mu;
     }
 
-    std::vector<float> get_sigmas(uint32_t n, int image_seq_len, scheduler_t /*scheduler_type*/, SDVersion /*version*/) override {
+    std::vector<float> get_sigmas(uint32_t n, int image_seq_len, SDVersion /*version*/) override {
         float mu = compute_empirical_mu(n, image_seq_len);
         LOG_DEBUG("Flux2FlowDenoiser: set shift to %.3f", mu);
         set_shift(mu);

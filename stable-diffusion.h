@@ -28,13 +28,6 @@ extern "C" {
 #include <stdint.h>
 #include <string.h>
 
-enum rng_type_t {
-    STD_DEFAULT_RNG,
-    CUDA_RNG,
-    CPU_RNG,
-    RNG_TYPE_COUNT
-};
-
 enum sample_method_t {
     EULER_SAMPLE_METHOD,
     EULER_A_SAMPLE_METHOD,
@@ -42,25 +35,7 @@ enum sample_method_t {
     SAMPLE_METHOD_COUNT
 };
 
-enum scheduler_t {
-    DISCRETE_SCHEDULER,
-    KARRAS_SCHEDULER,
-    EXPONENTIAL_SCHEDULER,
-    AYS_SCHEDULER,
-    GITS_SCHEDULER,
-    SGM_UNIFORM_SCHEDULER,
-    SIMPLE_SCHEDULER,
-    SMOOTHSTEP_SCHEDULER,
-    KL_OPTIMAL_SCHEDULER,
-    LCM_SCHEDULER,
-    BONG_TANGENT_SCHEDULER,
-    SCHEDULER_COUNT
-};
 
-enum prediction_t {
-    FLUX2_FLOW_PRED,
-    PREDICTION_COUNT
-};
 
 // same as enum ggml_type
 enum sd_type_t {
@@ -142,9 +117,6 @@ typedef struct {
     bool free_params_immediately;
     int n_threads;
     enum sd_type_t wtype;
-    enum rng_type_t rng_type;
-    enum rng_type_t sampler_rng_type;
-    enum prediction_t prediction;
     bool offload_params_to_cpu;
     bool enable_mmap;
     bool keep_llm_on_cpu;
@@ -169,7 +141,6 @@ typedef struct {
 
 typedef struct {
     sd_guidance_params_t guidance;
-    enum scheduler_t scheduler;
     enum sample_method_t sample_method;
     int sample_steps;
     float eta;
@@ -206,14 +177,8 @@ SD_API const char* sd_get_system_info();
 
 SD_API const char* sd_type_name(enum sd_type_t type);
 SD_API enum sd_type_t str_to_sd_type(const char* str);
-SD_API const char* sd_rng_type_name(enum rng_type_t rng_type);
-SD_API enum rng_type_t str_to_rng_type(const char* str);
 SD_API const char* sd_sample_method_name(enum sample_method_t sample_method);
 SD_API enum sample_method_t str_to_sample_method(const char* str);
-SD_API const char* sd_scheduler_name(enum scheduler_t scheduler);
-SD_API enum scheduler_t str_to_scheduler(const char* str);
-SD_API const char* sd_prediction_name(enum prediction_t prediction);
-SD_API enum prediction_t str_to_prediction(const char* str);
 SD_API const char* sd_preview_name(enum preview_t preview);
 SD_API enum preview_t str_to_preview(const char* str);
 
@@ -227,7 +192,6 @@ SD_API void sd_sample_params_init(sd_sample_params_t* sample_params);
 SD_API char* sd_sample_params_to_str(const sd_sample_params_t* sample_params);
 
 SD_API enum sample_method_t sd_get_default_sample_method(const sd_ctx_t* sd_ctx);
-SD_API enum scheduler_t sd_get_default_scheduler(const sd_ctx_t* sd_ctx, enum sample_method_t sample_method);
 
 SD_API void sd_img_gen_params_init(sd_img_gen_params_t* sd_img_gen_params);
 SD_API char* sd_img_gen_params_to_str(const sd_img_gen_params_t* sd_img_gen_params);

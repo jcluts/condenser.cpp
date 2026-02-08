@@ -212,10 +212,6 @@ std::string get_image_params(const SDCliParams& cli_params, const SDContextParam
     parameter_string += "Seed: " + std::to_string(seed) + ", ";
     parameter_string += "Size: " + std::to_string(gen_params.get_resolved_width()) + "x" + std::to_string(gen_params.get_resolved_height()) + ", ";
     parameter_string += "Model: " + sd_basename(ctx_params.model_path) + ", ";
-    parameter_string += "RNG: " + std::string(sd_rng_type_name(ctx_params.rng_type)) + ", ";
-    if (ctx_params.sampler_rng_type != RNG_TYPE_COUNT) {
-        parameter_string += "Sampler RNG: " + std::string(sd_rng_type_name(ctx_params.sampler_rng_type)) + ", ";
-    }
     parameter_string += "Sampler: " + std::string(sd_sample_method_name(gen_params.sample_params.sample_method));
     if (!gen_params.custom_sigmas.empty()) {
         parameter_string += ", Custom Sigmas: [";
@@ -225,8 +221,6 @@ std::string get_image_params(const SDCliParams& cli_params, const SDContextParam
             parameter_string += oss.str() + (i == gen_params.custom_sigmas.size() - 1 ? "" : ", ");
         }
         parameter_string += "]";
-    } else if (gen_params.sample_params.scheduler != SCHEDULER_COUNT) {  // Only show schedule if not using custom sigmas
-        parameter_string += " " + std::string(sd_scheduler_name(gen_params.sample_params.scheduler));
     }
     parameter_string += ", ";
     if (!ctx_params.llm_path.empty()) {
@@ -540,10 +534,6 @@ int main(int argc, const char* argv[]) {
 
         if (gen_params.sample_params.sample_method == SAMPLE_METHOD_COUNT) {
             gen_params.sample_params.sample_method = sd_get_default_sample_method(sd_ctx);
-        }
-
-        if (gen_params.sample_params.scheduler == SCHEDULER_COUNT) {
-            gen_params.sample_params.scheduler = sd_get_default_scheduler(sd_ctx, gen_params.sample_params.sample_method);
         }
 
         if (cli_params.mode == IMG_GEN) {

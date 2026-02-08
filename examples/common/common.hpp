@@ -435,8 +435,6 @@ struct SDContextParams {
     sd_type_t wtype = SD_TYPE_COUNT;
     std::string tensor_type_rules;
 
-    rng_type_t rng_type         = CUDA_RNG;
-    rng_type_t sampler_rng_type = RNG_TYPE_COUNT;
     bool offload_params_to_cpu  = false;
     bool enable_mmap            = false;
     bool llm_on_cpu             = false;
@@ -448,8 +446,6 @@ struct SDContextParams {
     bool circular   = false;
     bool circular_x = false;
     bool circular_y = false;
-
-    prediction_t prediction = PREDICTION_COUNT;
 
     sd_tiling_params_t vae_tiling_params = {false, 0, 0, 0.5f, 0.0f, 0.0f};
 
@@ -547,48 +543,6 @@ struct SDContextParams {
             return 1;
         };
 
-        auto on_rng_arg = [&](int argc, const char** argv, int index) {
-            if (++index >= argc) {
-                return -1;
-            }
-            const char* arg = argv[index];
-            rng_type        = str_to_rng_type(arg);
-            if (rng_type == RNG_TYPE_COUNT) {
-                LOG_ERROR("error: invalid rng type %s",
-                          arg);
-                return -1;
-            }
-            return 1;
-        };
-
-        auto on_sampler_rng_arg = [&](int argc, const char** argv, int index) {
-            if (++index >= argc) {
-                return -1;
-            }
-            const char* arg  = argv[index];
-            sampler_rng_type = str_to_rng_type(arg);
-            if (sampler_rng_type == RNG_TYPE_COUNT) {
-                LOG_ERROR("error: invalid sampler rng type %s",
-                          arg);
-                return -1;
-            }
-            return 1;
-        };
-
-        auto on_prediction_arg = [&](int argc, const char** argv, int index) {
-            if (++index >= argc) {
-                return -1;
-            }
-            const char* arg = argv[index];
-            prediction      = str_to_prediction(arg);
-            if (prediction == PREDICTION_COUNT) {
-                LOG_ERROR("error: invalid prediction type %s",
-                          arg);
-                return -1;
-            }
-            return 1;
-        };
-
 
         auto on_tile_size_arg = [&](int argc, const char** argv, int index) {
             if (++index >= argc) {
@@ -643,18 +597,6 @@ struct SDContextParams {
              "If not specified, the default is the type of the weight file",
              on_type_arg},
             {"",
-             "--rng",
-             "RNG, one of [std_default, cuda, cpu], default: cuda(sd-webui), cpu(comfyui)",
-             on_rng_arg},
-            {"",
-             "--sampler-rng",
-             "sampler RNG, one of [std_default, cuda, cpu]. If not specified, use --rng",
-             on_sampler_rng_arg},
-            {"",
-             "--prediction",
-             "prediction type override (default: flux2_flow)",
-             on_prediction_arg},
-            {"",
              "--vae-tile-size",
              "tile size for vae tiling, format [X]x[Y] (default: 32x32)",
              on_tile_size_arg},
@@ -698,8 +640,6 @@ struct SDContextParams {
             << "  esrgan_path: \"" << esrgan_path << "\",\n"
             << "  wtype: " << sd_type_name(wtype) << ",\n"
             << "  tensor_type_rules: \"" << tensor_type_rules << "\",\n"
-            << "  rng_type: " << sd_rng_type_name(rng_type) << ",\n"
-            << "  sampler_rng_type: " << sd_rng_type_name(sampler_rng_type) << ",\n"
             << "  offload_params_to_cpu: " << (offload_params_to_cpu ? "true" : "false") << ",\n"
             << "  enable_mmap: " << (enable_mmap ? "true" : "false") << ",\n"
             << "  llm_on_cpu: " << (llm_on_cpu ? "true" : "false") << ",\n"
@@ -707,7 +647,6 @@ struct SDContextParams {
             << "  flash_attn: " << (flash_attn ? "true" : "false") << ",\n"
             << "  diffusion_flash_attn: " << (diffusion_flash_attn ? "true" : "false") << ",\n"
             << "  vae_conv_direct: " << (vae_conv_direct ? "true" : "false") << ",\n"
-            << "  prediction: " << sd_prediction_name(prediction) << ",\n"
             << "  vae_tiling_params: { "
             << vae_tiling_params.enabled << ", "
             << vae_tiling_params.tile_size_x << ", "
@@ -732,9 +671,6 @@ struct SDContextParams {
         sd_ctx_params.free_params_immediately = free_params_immediately;
         sd_ctx_params.n_threads               = n_threads;
         sd_ctx_params.wtype                   = wtype;
-        sd_ctx_params.rng_type                = rng_type;
-        sd_ctx_params.sampler_rng_type        = sampler_rng_type;
-        sd_ctx_params.prediction              = prediction;
         sd_ctx_params.offload_params_to_cpu   = offload_params_to_cpu;
         sd_ctx_params.enable_mmap             = enable_mmap;
         sd_ctx_params.keep_llm_on_cpu        = llm_on_cpu;
@@ -881,20 +817,6 @@ struct SDGenerationParams {
             return 1;
         };
 
-        auto on_scheduler_arg = [&](int argc, const char** argv, int index) {
-            if (++index >= argc) {
-                return -1;
-            }
-            const char* arg         = argv[index];
-            sample_params.scheduler = str_to_scheduler(arg);
-            if (sample_params.scheduler == SCHEDULER_COUNT) {
-                LOG_ERROR("error: invalid scheduler %s",
-                          arg);
-                return -1;
-            }
-            return 1;
-        };
-
         auto on_sigmas_arg = [&](int argc, const char** argv, int index) {
             if (++index >= argc) {
                 return -1;
@@ -949,10 +871,6 @@ struct SDGenerationParams {
              "--sampling-method",
              "sampling method, one of [euler, euler_a, heun] (default: euler)",
              on_sample_method_arg},
-            {"",
-             "--scheduler",
-             "denoiser sigma scheduler (ignored for Flux 2 Klein, which uses its own mu-shifted schedule)",
-             on_scheduler_arg},
             {"",
              "--sigmas",
              "custom sigma values for the sampler, comma-separated (e.g., \"14.61,7.8,3.5,0.0\").",
@@ -1023,13 +941,6 @@ struct SDGenerationParams {
             }
         };
         load_sampler_if_exists("sample_method", sample_params.sample_method);
-
-        if (j.contains("scheduler") && j["scheduler"].is_string()) {
-            enum scheduler_t tmp = str_to_scheduler(j["scheduler"].get<std::string>().c_str());
-            if (tmp != SCHEDULER_COUNT) {
-                sample_params.scheduler = tmp;
-            }
-        }
 
         return true;
     }

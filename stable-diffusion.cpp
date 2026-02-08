@@ -2,7 +2,6 @@
 
 #include "model.h"
 #include "rng.hpp"
-#include "rng_mt19937.hpp"
 #include "rng_philox.hpp"
 #include "stable-diffusion.h"
 #include "util.h"
@@ -190,7 +189,6 @@ public:
     bool free_params_immediately = false;
 
     std::shared_ptr<RNG> rng         = std::make_shared<PhiloxRNG>();
-    std::shared_ptr<RNG> sampler_rng = nullptr;
     int n_threads                    = -1;
     float scale_factor               = 0.18215f;
     float shift_factor               = 0.f;
@@ -286,14 +284,8 @@ public:
         }
     }
 
-    std::shared_ptr<RNG> get_rng(rng_type_t rng_type) {
-        if (rng_type == STD_DEFAULT_RNG) {
-            return std::make_shared<STDDefaultRNG>();
-        } else if (rng_type == CPU_RNG) {
-            return std::make_shared<MT19937RNG>();
-        } else {  // default: CUDA_RNG
-            return std::make_shared<PhiloxRNG>();
-        }
+    std::shared_ptr<RNG> get_rng() {
+        return std::make_shared<PhiloxRNG>();
     }
 
     bool init(const sd_ctx_params_t* sd_ctx_params) {
@@ -302,12 +294,7 @@ public:
         free_params_immediately = sd_ctx_params->free_params_immediately;
         offload_params_to_cpu   = sd_ctx_params->offload_params_to_cpu;
 
-        rng = get_rng(sd_ctx_params->rng_type);
-        if (sd_ctx_params->sampler_rng_type != RNG_TYPE_COUNT && sd_ctx_params->sampler_rng_type != sd_ctx_params->rng_type) {
-            sampler_rng = get_rng(sd_ctx_params->sampler_rng_type);
-        } else {
-            sampler_rng = rng;
-        }
+        rng = get_rng();
 
         ggml_log_set(ggml_log_callback_default, nullptr);
 
@@ -716,7 +703,7 @@ public:
             return denoised;
         };
 
-        if (!sample_k_diffusion(method, denoise, work_ctx, x, sigmas, sampler_rng, eta)) {
+        if (!sample_k_diffusion(method, denoise, work_ctx, x, sigmas, rng, eta)) {
             LOG_ERROR("Diffusion model sampling failed");
             diffusion_model->free_compute_buffer();
             return NULL;
@@ -1053,28 +1040,6 @@ enum sd_type_t str_to_sd_type(const char* str) {
     return SD_TYPE_COUNT;
 }
 
-const char* rng_type_to_str[] = {
-    "std_default",
-    "cuda",
-    "cpu",
-};
-
-const char* sd_rng_type_name(enum rng_type_t rng_type) {
-    if (rng_type < RNG_TYPE_COUNT) {
-        return rng_type_to_str[rng_type];
-    }
-    return NONE_STR;
-}
-
-enum rng_type_t str_to_rng_type(const char* str) {
-    for (int i = 0; i < RNG_TYPE_COUNT; i++) {
-        if (!strcmp(str, rng_type_to_str[i])) {
-            return (enum rng_type_t)i;
-        }
-    }
-    return RNG_TYPE_COUNT;
-}
-
 const char* sample_method_to_str[] = {
     "euler",
     "euler_a",
@@ -1095,56 +1060,6 @@ enum sample_method_t str_to_sample_method(const char* str) {
         }
     }
     return SAMPLE_METHOD_COUNT;
-}
-
-const char* scheduler_to_str[] = {
-    "discrete",
-    "karras",
-    "exponential",
-    "ays",
-    "gits",
-    "sgm_uniform",
-    "simple",
-    "smoothstep",
-    "kl_optimal",
-    "lcm",
-    "bong_tangent",
-};
-
-const char* sd_scheduler_name(enum scheduler_t scheduler) {
-    if (scheduler < SCHEDULER_COUNT) {
-        return scheduler_to_str[scheduler];
-    }
-    return NONE_STR;
-}
-
-enum scheduler_t str_to_scheduler(const char* str) {
-    for (int i = 0; i < SCHEDULER_COUNT; i++) {
-        if (!strcmp(str, scheduler_to_str[i])) {
-            return (enum scheduler_t)i;
-        }
-    }
-    return SCHEDULER_COUNT;
-}
-
-const char* prediction_to_str[] = {
-    "flux2_flow",
-};
-
-const char* sd_prediction_name(enum prediction_t prediction) {
-    if (prediction < PREDICTION_COUNT) {
-        return prediction_to_str[prediction];
-    }
-    return NONE_STR;
-}
-
-enum prediction_t str_to_prediction(const char* str) {
-    for (int i = 0; i < PREDICTION_COUNT; i++) {
-        if (!strcmp(str, prediction_to_str[i])) {
-            return (enum prediction_t)i;
-        }
-    }
-    return PREDICTION_COUNT;
 }
 
 const char* preview_to_str[] = {
@@ -1177,9 +1092,6 @@ void sd_ctx_params_init(sd_ctx_params_t* sd_ctx_params) {
     sd_ctx_params->free_params_immediately = true;
     sd_ctx_params->n_threads               = sd_get_num_physical_cores();
     sd_ctx_params->wtype                   = SD_TYPE_COUNT;
-    sd_ctx_params->rng_type                = CUDA_RNG;
-    sd_ctx_params->sampler_rng_type        = RNG_TYPE_COUNT;
-    sd_ctx_params->prediction              = PREDICTION_COUNT;
     sd_ctx_params->offload_params_to_cpu   = false;
     sd_ctx_params->enable_mmap             = false;
     sd_ctx_params->keep_llm_on_cpu        = false;
@@ -1206,9 +1118,6 @@ char* sd_ctx_params_to_str(const sd_ctx_params_t* sd_ctx_params) {
              "free_params_immediately: %s\n"
              "n_threads: %d\n"
              "wtype: %s\n"
-             "rng_type: %s\n"
-             "sampler_rng_type: %s\n"
-             "prediction: %s\n"
              "offload_params_to_cpu: %s\n"
              "keep_llm_on_cpu: %s\n"
              "keep_vae_on_cpu: %s\n"
@@ -1226,9 +1135,6 @@ char* sd_ctx_params_to_str(const sd_ctx_params_t* sd_ctx_params) {
              BOOL_STR(sd_ctx_params->free_params_immediately),
              sd_ctx_params->n_threads,
              sd_type_name(sd_ctx_params->wtype),
-             sd_rng_type_name(sd_ctx_params->rng_type),
-             sd_rng_type_name(sd_ctx_params->sampler_rng_type),
-             sd_prediction_name(sd_ctx_params->prediction),
              BOOL_STR(sd_ctx_params->offload_params_to_cpu),
              BOOL_STR(sd_ctx_params->keep_llm_on_cpu),
              BOOL_STR(sd_ctx_params->keep_vae_on_cpu),
@@ -1243,7 +1149,6 @@ char* sd_ctx_params_to_str(const sd_ctx_params_t* sd_ctx_params) {
 void sd_sample_params_init(sd_sample_params_t* sample_params) {
     *sample_params                             = {};
     sample_params->guidance.distilled_guidance = 3.5f;
-    sample_params->scheduler                   = SCHEDULER_COUNT;
     sample_params->sample_method               = SAMPLE_METHOD_COUNT;
     sample_params->sample_steps                = 20;
     sample_params->custom_sigmas               = nullptr;
@@ -1258,12 +1163,10 @@ char* sd_sample_params_to_str(const sd_sample_params_t* sample_params) {
 
     snprintf(buf + strlen(buf), 4096 - strlen(buf),
              "(distilled_guidance: %.2f, "
-             "scheduler: %s, "
              "sample_method: %s, "
              "sample_steps: %d, "
              "eta: %.2f)",
              sample_params->guidance.distilled_guidance,
-             sd_scheduler_name(sample_params->scheduler),
              sd_sample_method_name(sample_params->sample_method),
              sample_params->sample_steps,
              sample_params->eta);
@@ -1353,10 +1256,6 @@ enum sample_method_t sd_get_default_sample_method(const sd_ctx_t* sd_ctx) {
     return EULER_SAMPLE_METHOD;
 }
 
-enum scheduler_t sd_get_default_scheduler(const sd_ctx_t* sd_ctx, enum sample_method_t sample_method) {
-    return DISCRETE_SCHEDULER;
-}
-
 sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
                                     struct ggml_context* work_ctx,
                                     ggml_tensor* init_latent,
@@ -1427,7 +1326,6 @@ sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
         LOG_INFO("generating image: %i/%i - seed %" PRId64, b + 1, batch_count, cur_seed);
 
         sd_ctx->sd->rng->manual_seed(cur_seed);
-        sd_ctx->sd->sampler_rng->manual_seed(cur_seed);
         struct ggml_tensor* x_t   = init_latent;
         struct ggml_tensor* noise = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, W, H, C, 1);
         ggml_ext_im_set_randn_f32(noise, sd_ctx->sd->rng);
@@ -1539,7 +1437,6 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
         seed = rand();
     }
     sd_ctx->sd->rng->manual_seed(seed);
-    sd_ctx->sd->sampler_rng->manual_seed(seed);
 
     size_t t0 = ggml_time_ms();
 
@@ -1566,13 +1463,8 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
             LOG_WARN("sample_steps != custom_sigmas_count - 1, set sample_steps to %d", sample_steps);
         }
     } else {
-        scheduler_t scheduler = sd_img_gen_params->sample_params.scheduler;
-        if (scheduler == SCHEDULER_COUNT) {
-            scheduler = sd_get_default_scheduler(sd_ctx, sample_method);
-        }
         sigmas = sd_ctx->sd->denoiser->get_sigmas(sample_steps,
                                                   sd_ctx->sd->get_image_seq_len(height, width),
-                                                  scheduler,
                                                   sd_ctx->sd->version);
     }
 
@@ -1743,7 +1635,6 @@ sd_image_t* generate_image_with_condition(sd_ctx_t* sd_ctx,
         seed = rand();
     }
     sd_ctx->sd->rng->manual_seed(seed);
-    sd_ctx->sd->sampler_rng->manual_seed(seed);
 
     size_t t0 = ggml_time_ms();
 
@@ -1771,14 +1662,9 @@ sd_image_t* generate_image_with_condition(sd_ctx_t* sd_ctx,
             LOG_WARN("sample_steps != custom_sigmas_count - 1, set sample_steps to %d", sample_steps);
         }
     } else {
-        scheduler_t scheduler = sd_img_gen_params->sample_params.scheduler;
-        if (scheduler == SCHEDULER_COUNT) {
-            scheduler = sd_get_default_scheduler(sd_ctx, sample_method);
-        }
         sigmas = sd_ctx->sd->denoiser->get_sigmas(
             sample_steps,
             sd_ctx->sd->get_image_seq_len(height, width),
-            scheduler,
             sd_ctx->sd->version);
     }
 
@@ -1934,7 +1820,6 @@ sd_image_t* generate_image_with_condition_and_latents(
         seed = rand();
     }
     sd_ctx->sd->rng->manual_seed(seed);
-    sd_ctx->sd->sampler_rng->manual_seed(seed);
 
     size_t t0 = ggml_time_ms();
 
@@ -1962,14 +1847,9 @@ sd_image_t* generate_image_with_condition_and_latents(
             LOG_WARN("sample_steps != custom_sigmas_count - 1, set sample_steps to %d", sample_steps);
         }
     } else {
-        scheduler_t scheduler = sd_img_gen_params->sample_params.scheduler;
-        if (scheduler == SCHEDULER_COUNT) {
-            scheduler = sd_get_default_scheduler(sd_ctx, sample_method);
-        }
         sigmas = sd_ctx->sd->denoiser->get_sigmas(
             sample_steps,
             sd_ctx->sd->get_image_seq_len(height, width),
-            scheduler,
             sd_ctx->sd->version);
     }
 

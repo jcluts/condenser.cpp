@@ -249,13 +249,6 @@ static sample_method_t parse_sample_method(const std::string& s) {
     return m;
 }
 
-// Parse a scheduler string, returning SCHEDULER_COUNT on failure.
-static scheduler_t parse_scheduler(const std::string& s) {
-    if (s.empty()) return SCHEDULER_COUNT;
-    auto sc = str_to_scheduler(s.c_str());
-    return sc;
-}
-
 // ---------------------------------------------------------------------------
 // Command handlers
 // ---------------------------------------------------------------------------
@@ -424,16 +417,6 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
     // If still COUNT (not set), ask the context for its default
     if (sample_params.sample_method == SAMPLE_METHOD_COUNT) {
         sample_params.sample_method = sd_get_default_sample_method(state.ctx);
-    }
-
-    // Scheduler
-    std::string sched_str = p.value("scheduler", "");
-    if (!sched_str.empty()) {
-        auto sc = parse_scheduler(sched_str);
-        if (sc != SCHEDULER_COUNT) sample_params.scheduler = sc;
-    }
-    if (sample_params.scheduler == SCHEDULER_COUNT) {
-        sample_params.scheduler = sd_get_default_scheduler(state.ctx, sample_params.sample_method);
     }
 
     // Custom sigmas

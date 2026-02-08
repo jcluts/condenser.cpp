@@ -103,7 +103,6 @@ Generates images using the currently loaded model. Fails if no model is loaded.
     "seed": 42,
     "steps": 4,
     "sampling_method": "euler",
-    "scheduler": "simple",
     "guidance": 3.5,
     "batch_count": 1,
     "output": "/path/to/output.png",
