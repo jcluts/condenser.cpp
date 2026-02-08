@@ -71,14 +71,12 @@ Creates or replaces the inference context. Frees any previously loaded model fir
     "n_threads": 8,
     "flash_attn": true,
     "diffusion_flash_attn": false,
-    "diffusion_conv_direct": false,
     "vae_conv_direct": false,
     "offload_to_cpu": false,
     "llm_on_cpu": false,
     "vae_on_cpu": false,
     "vae_decode_only": true,
-    "free_params_immediately": true,
-    "flow_shift": 1.0
+    "free_params_immediately": true
   }
 }
 ```
@@ -116,9 +114,6 @@ Generates images using the currently loaded model. Fails if no model is loaded.
       "tile_size_x": 256,
       "tile_size_y": 256,
       "target_overlap": 0.5
-    },
-    "cache": {
-      "mode": "disabled"
     },
     "use_prompt_cache": true,
     "use_ref_latent_cache": true

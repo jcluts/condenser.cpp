@@ -559,7 +559,6 @@ int main(int argc, const char* argv[]) {
             img_gen_params.seed                   = gen_params.seed;
             img_gen_params.batch_count            = gen_params.batch_count;
             img_gen_params.vae_tiling_params      = ctx_params.vae_tiling_params;
-            img_gen_params.cache                  = gen_params.cache_params;
 
             results     = generate_image(sd_ctx, &img_gen_params);
             num_results = gen_params.batch_count;
@@ -578,7 +577,7 @@ int main(int argc, const char* argv[]) {
     if (ctx_params.esrgan_path.size() > 0 && gen_params.upscale_repeats > 0) {
         upscaler_ctx_t* upscaler_ctx = new_upscaler_ctx(ctx_params.esrgan_path.c_str(),
                                                         ctx_params.offload_params_to_cpu,
-                                                        ctx_params.diffusion_conv_direct,
+                                                        false,
                                                         ctx_params.n_threads,
                                                         gen_params.upscale_tile_size);
 

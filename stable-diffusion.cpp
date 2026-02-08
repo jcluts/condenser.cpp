@@ -7,11 +7,9 @@
 #include "stable-diffusion.h"
 #include "util.h"
 
-#include "cache_dit.hpp"
 #include "conditioner.hpp"
 #include "denoiser.hpp"
 #include "diffusion_model.hpp"
-#include "easycache.hpp"
 #include "vae.hpp"
 
 #include "latent-preview.h"
@@ -624,96 +622,7 @@ public:
                         sample_method_t method,
                         const std::vector<float>& sigmas,
                         std::vector<ggml_tensor*> ref_latents = {},
-                        bool increase_ref_index               = false,
-                        const sd_cache_params_t* cache_params = nullptr) {
-
-        EasyCacheState easycache_state;
-        CacheDitConditionState cachedit_state;
-        bool easycache_enabled = false;
-        bool cachedit_enabled  = false;
-
-        if (cache_params != nullptr && cache_params->mode != SD_CACHE_DISABLED) {
-            bool percent_valid = true;
-
-            if (cache_params->mode == SD_CACHE_EASYCACHE) {
-                percent_valid = cache_params->start_percent >= 0.0f &&
-                                cache_params->start_percent < 1.0f &&
-                                cache_params->end_percent > 0.0f &&
-                                cache_params->end_percent <= 1.0f &&
-                                cache_params->start_percent < cache_params->end_percent;
-            }
-
-            if (!percent_valid) {
-                LOG_WARN("Cache disabled due to invalid percent range (start=%.3f, end=%.3f)",
-                         cache_params->start_percent,
-                         cache_params->end_percent);
-            } else if (cache_params->mode == SD_CACHE_EASYCACHE) {
-                bool easycache_supported = sd_version_is_dit(version);
-                if (!easycache_supported) {
-                    LOG_WARN("EasyCache requested but not supported for this model type");
-                } else {
-                    EasyCacheConfig easycache_config;
-                    easycache_config.enabled         = true;
-                    easycache_config.reuse_threshold = std::max(0.0f, cache_params->reuse_threshold);
-                    easycache_config.start_percent   = cache_params->start_percent;
-                    easycache_config.end_percent     = cache_params->end_percent;
-                    easycache_state.init(easycache_config, denoiser.get());
-                    if (easycache_state.enabled()) {
-                        easycache_enabled = true;
-                        LOG_INFO("EasyCache enabled - threshold: %.3f, start: %.2f, end: %.2f",
-                                 easycache_config.reuse_threshold,
-                                 easycache_config.start_percent,
-                                 easycache_config.end_percent);
-                    } else {
-                        LOG_WARN("EasyCache requested but could not be initialized for this run");
-                    }
-                }
-            } else if (cache_params->mode == SD_CACHE_DBCACHE ||
-                       cache_params->mode == SD_CACHE_TAYLORSEER ||
-                       cache_params->mode == SD_CACHE_CACHE_DIT) {
-                bool cachedit_supported = sd_version_is_dit(version);
-                if (!cachedit_supported) {
-                    LOG_WARN("CacheDIT requested but not supported for this model type (only DiT models)");
-                } else {
-                    DBCacheConfig dbcfg;
-                    dbcfg.enabled                     = (cache_params->mode == SD_CACHE_DBCACHE ||
-                                     cache_params->mode == SD_CACHE_CACHE_DIT);
-                    dbcfg.Fn_compute_blocks           = cache_params->Fn_compute_blocks;
-                    dbcfg.Bn_compute_blocks           = cache_params->Bn_compute_blocks;
-                    dbcfg.residual_diff_threshold     = cache_params->residual_diff_threshold;
-                    dbcfg.max_warmup_steps            = cache_params->max_warmup_steps;
-                    dbcfg.max_cached_steps            = cache_params->max_cached_steps;
-                    dbcfg.max_continuous_cached_steps = cache_params->max_continuous_cached_steps;
-                    if (cache_params->scm_mask != nullptr && strlen(cache_params->scm_mask) > 0) {
-                        dbcfg.steps_computation_mask = parse_scm_mask(cache_params->scm_mask);
-                    }
-                    dbcfg.scm_policy_dynamic = cache_params->scm_policy_dynamic;
-
-                    TaylorSeerConfig tcfg;
-                    tcfg.enabled             = (cache_params->mode == SD_CACHE_TAYLORSEER ||
-                                    cache_params->mode == SD_CACHE_CACHE_DIT);
-                    tcfg.n_derivatives       = cache_params->taylorseer_n_derivatives;
-                    tcfg.skip_interval_steps = cache_params->taylorseer_skip_interval;
-
-                    cachedit_state.init(dbcfg, tcfg);
-                    if (cachedit_state.enabled()) {
-                        cachedit_enabled = true;
-                        LOG_INFO("CacheDIT enabled - mode: %s, Fn: %d, Bn: %d, threshold: %.3f, warmup: %d",
-                                 cache_params->mode == SD_CACHE_CACHE_DIT ? "DBCache+TaylorSeer" : (cache_params->mode == SD_CACHE_DBCACHE ? "DBCache" : "TaylorSeer"),
-                                 dbcfg.Fn_compute_blocks,
-                                 dbcfg.Bn_compute_blocks,
-                                 dbcfg.residual_diff_threshold,
-                                 dbcfg.max_warmup_steps);
-                    } else {
-                        LOG_WARN("CacheDIT requested but could not be initialized for this run");
-                    }
-                }
-            }
-        }
-
-        if (cachedit_enabled) {
-            cachedit_state.set_sigmas(sigmas);
-        }
+                        bool increase_ref_index               = false) {
 
         size_t steps          = sigmas.size() - 1;
         struct ggml_tensor* x = ggml_dup_tensor(work_ctx, init_latent);
@@ -753,88 +662,6 @@ public:
 
             DiffusionParams diffusion_params;
 
-            const bool easycache_step_active = easycache_enabled && step > 0;
-            int easycache_step_index         = easycache_step_active ? (step - 1) : -1;
-            if (easycache_step_active) {
-                easycache_state.begin_step(easycache_step_index, sigma);
-            }
-
-            auto easycache_before_condition = [&](const SDCondition* condition, struct ggml_tensor* output_tensor) -> bool {
-                if (!easycache_step_active || condition == nullptr || output_tensor == nullptr) {
-                    return false;
-                }
-                return easycache_state.before_condition(condition,
-                                                        diffusion_params.x,
-                                                        output_tensor,
-                                                        sigma,
-                                                        easycache_step_index);
-            };
-
-            auto easycache_after_condition = [&](const SDCondition* condition, struct ggml_tensor* output_tensor) {
-                if (!easycache_step_active || condition == nullptr || output_tensor == nullptr) {
-                    return;
-                }
-                easycache_state.after_condition(condition,
-                                                diffusion_params.x,
-                                                output_tensor);
-            };
-
-            auto easycache_step_is_skipped = [&]() {
-                return easycache_step_active && easycache_state.is_step_skipped();
-            };
-
-     
-            const bool cachedit_step_active = cachedit_enabled && step > 0;
-            int cachedit_step_index         = cachedit_step_active ? (step - 1) : -1;
-            if (cachedit_step_active) {
-                cachedit_state.begin_step(cachedit_step_index, sigma);
-            }
-
-            auto cachedit_before_condition = [&](const SDCondition* condition, struct ggml_tensor* output_tensor) -> bool {
-                if (!cachedit_step_active || condition == nullptr || output_tensor == nullptr) {
-                    return false;
-                }
-                return cachedit_state.before_condition(condition,
-                                                       diffusion_params.x,
-                                                       output_tensor,
-                                                       sigma,
-                                                       cachedit_step_index);
-            };
-
-            auto cachedit_after_condition = [&](const SDCondition* condition, struct ggml_tensor* output_tensor) {
-                if (!cachedit_step_active || condition == nullptr || output_tensor == nullptr) {
-                    return;
-                }
-                cachedit_state.after_condition(condition,
-                                               diffusion_params.x,
-                                               output_tensor);
-            };
-
-            auto cachedit_step_is_skipped = [&]() {
-                return cachedit_step_active && cachedit_state.is_step_skipped();
-            };
-
-            auto cache_before_condition = [&](const SDCondition* condition, struct ggml_tensor* output_tensor) -> bool {
-                if (easycache_step_active) {
-                    return easycache_before_condition(condition, output_tensor);
-                } else if (cachedit_step_active) {
-                    return cachedit_before_condition(condition, output_tensor);
-                }
-                return false;
-            };
-
-            auto cache_after_condition = [&](const SDCondition* condition, struct ggml_tensor* output_tensor) {
-                if (easycache_step_active) {
-                    easycache_after_condition(condition, output_tensor);
-                } else if (cachedit_step_active) {
-                    cachedit_after_condition(condition, output_tensor);
-                }
-            };
-
-            auto cache_step_is_skipped = [&]() {
-                return easycache_step_is_skipped() || cachedit_step_is_skipped();
-            };
-
             std::vector<float> scaling = denoiser->get_scalings(sigma);
             GGML_ASSERT(scaling.size() == 3);
             float c_skip = scaling[0];
@@ -860,21 +687,15 @@ public:
             diffusion_params.ref_latents        = ref_latents;
             diffusion_params.increase_ref_index = increase_ref_index;
 
-            const SDCondition* active_condition = &cond;
-            struct ggml_tensor** active_output  = &out_cond;
             diffusion_params.context  = cond.c_crossattn;
             diffusion_params.c_concat = cond.c_concat;
             diffusion_params.y        = cond.c_vector;
 
-            bool skip_model = cache_before_condition(active_condition, *active_output);
-            if (!skip_model) {
-                if (!work_diffusion_model->compute(n_threads,
-                                                   diffusion_params,
-                                                   active_output)) {
-                    LOG_ERROR("diffusion model compute failed");
-                    return nullptr;
-                }
-                cache_after_condition(active_condition, *active_output);
+            if (!work_diffusion_model->compute(n_threads,
+                                               diffusion_params,
+                                               &out_cond)) {
+                LOG_ERROR("diffusion model compute failed");
+                return nullptr;
             }
 
             float* vec_denoised  = (float*)denoised->data;
@@ -899,48 +720,6 @@ public:
             LOG_ERROR("Diffusion model sampling failed");
             diffusion_model->free_compute_buffer();
             return NULL;
-        }
-
-        if (easycache_enabled) {
-            size_t total_steps = sigmas.size() > 0 ? sigmas.size() - 1 : 0;
-            if (easycache_state.total_steps_skipped > 0 && total_steps > 0) {
-                if (easycache_state.total_steps_skipped < static_cast<int>(total_steps)) {
-                    double speedup = static_cast<double>(total_steps) /
-                                     static_cast<double>(total_steps - easycache_state.total_steps_skipped);
-                    LOG_INFO("EasyCache skipped %d/%zu steps (%.2fx estimated speedup)",
-                             easycache_state.total_steps_skipped,
-                             total_steps,
-                             speedup);
-                } else {
-                    LOG_INFO("EasyCache skipped %d/%zu steps",
-                             easycache_state.total_steps_skipped,
-                             total_steps);
-                }
-            } else if (total_steps > 0) {
-                LOG_INFO("EasyCache completed without skipping steps");
-            }
-        }
-
-        if (cachedit_enabled) {
-            size_t total_steps = sigmas.size() > 0 ? sigmas.size() - 1 : 0;
-            if (cachedit_state.total_steps_skipped > 0 && total_steps > 0) {
-                if (cachedit_state.total_steps_skipped < static_cast<int>(total_steps)) {
-                    double speedup = static_cast<double>(total_steps) /
-                                     static_cast<double>(total_steps - cachedit_state.total_steps_skipped);
-                    LOG_INFO("CacheDIT skipped %d/%zu steps (%.2fx estimated speedup), accum_diff: %.4f",
-                             cachedit_state.total_steps_skipped,
-                             total_steps,
-                             speedup,
-                             cachedit_state.accumulated_residual_diff);
-                } else {
-                    LOG_INFO("CacheDIT skipped %d/%zu steps, accum_diff: %.4f",
-                             cachedit_state.total_steps_skipped,
-                             total_steps,
-                             cachedit_state.accumulated_residual_diff);
-                }
-            } else if (total_steps > 0) {
-                LOG_INFO("CacheDIT completed without skipping steps");
-            }
         }
 
         if (inverse_noise_scaling) {
@@ -1392,27 +1171,6 @@ enum preview_t str_to_preview(const char* str) {
 }
 
 
-void sd_cache_params_init(sd_cache_params_t* cache_params) {
-    *cache_params                             = {};
-    cache_params->mode                        = SD_CACHE_DISABLED;
-    cache_params->reuse_threshold             = 1.0f;
-    cache_params->start_percent               = 0.15f;
-    cache_params->end_percent                 = 0.95f;
-    cache_params->error_decay_rate            = 1.0f;
-    cache_params->use_relative_threshold      = true;
-    cache_params->reset_error_on_compute      = true;
-    cache_params->Fn_compute_blocks           = 8;
-    cache_params->Bn_compute_blocks           = 0;
-    cache_params->residual_diff_threshold     = 0.08f;
-    cache_params->max_warmup_steps            = 8;
-    cache_params->max_cached_steps            = -1;
-    cache_params->max_continuous_cached_steps = -1;
-    cache_params->taylorseer_n_derivatives    = 1;
-    cache_params->taylorseer_skip_interval    = 1;
-    cache_params->scm_mask                    = nullptr;
-    cache_params->scm_policy_dynamic          = true;
-}
-
 void sd_ctx_params_init(sd_ctx_params_t* sd_ctx_params) {
     *sd_ctx_params                         = {};
     sd_ctx_params->vae_decode_only         = true;
@@ -1429,7 +1187,6 @@ void sd_ctx_params_init(sd_ctx_params_t* sd_ctx_params) {
     sd_ctx_params->diffusion_flash_attn    = false;
     sd_ctx_params->circular_x              = false;
     sd_ctx_params->circular_y              = false;
-    sd_ctx_params->flow_shift              = INFINITY;
 }
 
 char* sd_ctx_params_to_str(const sd_ctx_params_t* sd_ctx_params) {
@@ -1523,7 +1280,6 @@ void sd_img_gen_params_init(sd_img_gen_params_t* sd_img_gen_params) {
     sd_img_gen_params->seed              = -1;
     sd_img_gen_params->batch_count       = 1;
     sd_img_gen_params->vae_tiling_params = {false, 0, 0, 0.5f, 0.0f, 0.0f};
-    sd_cache_params_init(&sd_img_gen_params->cache);
 }
 
 char* sd_img_gen_params_to_str(const sd_img_gen_params_t* sd_img_gen_params) {
@@ -1554,16 +1310,6 @@ char* sd_img_gen_params_to_str(const sd_img_gen_params_t* sd_img_gen_params) {
              sd_img_gen_params->ref_images_count,
              BOOL_STR(sd_img_gen_params->increase_ref_index),
              BOOL_STR(sd_img_gen_params->vae_tiling_params.enabled));
-    const char* cache_mode_str = "disabled";
-    if (sd_img_gen_params->cache.mode == SD_CACHE_EASYCACHE) {
-        cache_mode_str = "easycache";
-    }
-    snprintf(buf + strlen(buf), 4096 - strlen(buf),
-             "cache: %s (threshold=%.3f, start=%.2f, end=%.2f)\n",
-             cache_mode_str,
-             sd_img_gen_params->cache.reuse_threshold,
-             sd_img_gen_params->cache.start_percent,
-             sd_img_gen_params->cache.end_percent);
     free(sample_params_str);
     return buf;
 }
@@ -1626,7 +1372,6 @@ sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
                                     std::vector<sd_image_t*> ref_images,
                                     std::vector<ggml_tensor*> ref_latents,
                                     bool increase_ref_index,
-                                    const sd_cache_params_t* cache_params = nullptr,
                                     const sd_condition_t* precomputed_condition = nullptr) {
     if (seed < 0) {
         // Generally, when using the provided command line, the seed is always >0.
@@ -1698,8 +1443,7 @@ sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
                                                      sample_method,
                                                      sigmas,
                                                      ref_latents,
-                                                     increase_ref_index,
-                                                     cache_params);
+                                                     increase_ref_index);
         int64_t sampling_end    = ggml_time_ms();
         if (x_0 != nullptr) {
             // print_ggml_tensor(x_0);
@@ -1888,8 +1632,7 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
                                                         sd_img_gen_params->batch_count,
                                                         ref_images,
                                                         ref_latents,
-                                                        sd_img_gen_params->increase_ref_index,
-                                                        &sd_img_gen_params->cache);
+                                                        sd_img_gen_params->increase_ref_index);
 
     size_t t2 = ggml_time_ms();
 
@@ -2082,7 +1825,6 @@ sd_image_t* generate_image_with_condition(sd_ctx_t* sd_ctx,
         sd_img_gen_params->batch_count,
         ref_images, ref_latents,
         sd_img_gen_params->increase_ref_index,
-        &sd_img_gen_params->cache,
         condition);  // pass pre-computed condition
 
     size_t t2 = ggml_time_ms();
@@ -2295,7 +2037,6 @@ sd_image_t* generate_image_with_condition_and_latents(
         sd_img_gen_params->batch_count,
         ref_images, ref_latents,
         sd_img_gen_params->increase_ref_index,
-        &sd_img_gen_params->cache,
         condition);  // may be NULL
 
     size_t t2 = ggml_time_ms();

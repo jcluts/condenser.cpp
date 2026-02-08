@@ -256,16 +256,6 @@ static scheduler_t parse_scheduler(const std::string& s) {
     return sc;
 }
 
-// Parse a cache mode string into sd_cache_mode_t.
-static sd_cache_mode_t parse_cache_mode(const std::string& s) {
-    if (s == "easycache")   return SD_CACHE_EASYCACHE;
-    if (s == "ucache")      return SD_CACHE_UCACHE;
-    if (s == "dbcache")     return SD_CACHE_DBCACHE;
-    if (s == "taylorseer")  return SD_CACHE_TAYLORSEER;
-    if (s == "cache-dit" || s == "cache_dit") return SD_CACHE_CACHE_DIT;
-    return SD_CACHE_DISABLED;
-}
-
 // ---------------------------------------------------------------------------
 // Command handlers
 // ---------------------------------------------------------------------------
@@ -351,7 +341,6 @@ static void handle_load(const std::string& id, const json& request, EngineState&
     if (p.contains("n_threads"))              ctx_params.n_threads              = p["n_threads"].get<int>();
     if (p.contains("flash_attn"))             ctx_params.flash_attn             = p["flash_attn"].get<bool>();
     if (p.contains("diffusion_flash_attn"))   ctx_params.diffusion_flash_attn   = p["diffusion_flash_attn"].get<bool>();
-    if (p.contains("diffusion_conv_direct"))  ctx_params.diffusion_conv_direct  = p["diffusion_conv_direct"].get<bool>();
     if (p.contains("vae_conv_direct"))        ctx_params.vae_conv_direct        = p["vae_conv_direct"].get<bool>();
     if (p.contains("offload_to_cpu"))         ctx_params.offload_params_to_cpu  = p["offload_to_cpu"].get<bool>();
     if (p.contains("llm_on_cpu"))             ctx_params.keep_llm_on_cpu        = p["llm_on_cpu"].get<bool>();
@@ -366,11 +355,6 @@ static void handle_load(const std::string& id, const json& request, EngineState&
     // model weight buffers after the first generation, causing use-after-free
     // crashes on subsequent generations.  Default to false for the engine.
     ctx_params.free_params_immediately = p.value("free_params_immediately", false);
-
-    // Flow shift
-    if (p.contains("flow_shift")) {
-        ctx_params.flow_shift = p["flow_shift"].get<float>();
-    }
 
     // Create context
     state.ctx = new_sd_ctx(&ctx_params);
@@ -470,26 +454,6 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
         vae_tiling.target_overlap = vt.value("target_overlap", 0.5f);
         if (vt.contains("rel_size_x")) vae_tiling.rel_size_x = vt["rel_size_x"].get<float>();
         if (vt.contains("rel_size_y")) vae_tiling.rel_size_y = vt["rel_size_y"].get<float>();
-    }
-
-    // Cache params (step caching — EasyCache/CacheDIT, not prompt cache)
-    sd_cache_params_t cache_params;
-    sd_cache_params_init(&cache_params);
-    if (p.contains("cache") && p["cache"].is_object()) {
-        const json& c = p["cache"];
-        std::string mode_str = c.value("mode", "disabled");
-        cache_params.mode = parse_cache_mode(mode_str);
-
-        if (c.contains("reuse_threshold"))        cache_params.reuse_threshold        = c["reuse_threshold"].get<float>();
-        if (c.contains("start_percent"))          cache_params.start_percent          = c["start_percent"].get<float>();
-        if (c.contains("end_percent"))            cache_params.end_percent            = c["end_percent"].get<float>();
-        if (c.contains("error_decay_rate"))       cache_params.error_decay_rate       = c["error_decay_rate"].get<float>();
-        if (c.contains("use_relative_threshold")) cache_params.use_relative_threshold = c["use_relative_threshold"].get<bool>();
-        if (c.contains("reset_error_on_compute")) cache_params.reset_error_on_compute = c["reset_error_on_compute"].get<bool>();
-        if (c.contains("Fn_compute_blocks"))      cache_params.Fn_compute_blocks      = c["Fn_compute_blocks"].get<int>();
-        if (c.contains("Bn_compute_blocks"))      cache_params.Bn_compute_blocks      = c["Bn_compute_blocks"].get<int>();
-        if (c.contains("residual_diff_threshold")) cache_params.residual_diff_threshold = c["residual_diff_threshold"].get<float>();
-        if (c.contains("max_warmup_steps"))       cache_params.max_warmup_steps       = c["max_warmup_steps"].get<int>();
     }
 
     // Reference images
@@ -699,7 +663,6 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
     img_gen_params.seed              = seed;
     img_gen_params.batch_count       = batch_count;
     img_gen_params.vae_tiling_params = vae_tiling;
-    img_gen_params.cache             = cache_params;
 
     // --- Run generation ---
     // Choose the most efficient generation path based on what's cached:

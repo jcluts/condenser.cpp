@@ -443,7 +443,6 @@ struct SDContextParams {
     bool vae_on_cpu             = false;
     bool flash_attn             = false;
     bool diffusion_flash_attn   = false;
-    bool diffusion_conv_direct  = false;
     bool vae_conv_direct        = false;
 
     bool circular   = false;
@@ -453,8 +452,6 @@ struct SDContextParams {
     prediction_t prediction = PREDICTION_COUNT;
 
     sd_tiling_params_t vae_tiling_params = {false, 0, 0, 0.5f, 0.0f, 0.0f};
-
-    float flow_shift = INFINITY;
 
     ArgOptions get_options() {
         ArgOptions options;
@@ -498,10 +495,6 @@ struct SDContextParams {
              "--vae-tile-overlap",
              "tile overlap for vae tiling, in fraction of tile size (default: 0.5)",
              &vae_tiling_params.target_overlap},
-            {"",
-             "--flow-shift",
-             "shift value for Flow models like SD3.x or WAN (default: auto)",
-             &flow_shift},
         };
 
         options.bool_options = {
@@ -533,10 +526,6 @@ struct SDContextParams {
              "--diffusion-fa",
              "use flash attention in the diffusion model only",
              true, &diffusion_flash_attn},
-            {"",
-             "--diffusion-conv-direct",
-             "use ggml_conv2d_direct in the diffusion model",
-             true, &diffusion_conv_direct},
             {"",
              "--vae-conv-direct",
              "use ggml_conv2d_direct in the vae model",
@@ -711,14 +700,12 @@ struct SDContextParams {
             << "  tensor_type_rules: \"" << tensor_type_rules << "\",\n"
             << "  rng_type: " << sd_rng_type_name(rng_type) << ",\n"
             << "  sampler_rng_type: " << sd_rng_type_name(sampler_rng_type) << ",\n"
-            << "  flow_shift: " << (std::isinf(flow_shift) ? "INF" : std::to_string(flow_shift)) << "\n"
             << "  offload_params_to_cpu: " << (offload_params_to_cpu ? "true" : "false") << ",\n"
             << "  enable_mmap: " << (enable_mmap ? "true" : "false") << ",\n"
             << "  llm_on_cpu: " << (llm_on_cpu ? "true" : "false") << ",\n"
             << "  vae_on_cpu: " << (vae_on_cpu ? "true" : "false") << ",\n"
             << "  flash_attn: " << (flash_attn ? "true" : "false") << ",\n"
             << "  diffusion_flash_attn: " << (diffusion_flash_attn ? "true" : "false") << ",\n"
-            << "  diffusion_conv_direct: " << (diffusion_conv_direct ? "true" : "false") << ",\n"
             << "  vae_conv_direct: " << (vae_conv_direct ? "true" : "false") << ",\n"
             << "  prediction: " << sd_prediction_name(prediction) << ",\n"
             << "  vae_tiling_params: { "
@@ -754,11 +741,9 @@ struct SDContextParams {
         sd_ctx_params.keep_vae_on_cpu         = vae_on_cpu;
         sd_ctx_params.flash_attn              = flash_attn;
         sd_ctx_params.diffusion_flash_attn    = diffusion_flash_attn;
-        sd_ctx_params.diffusion_conv_direct   = diffusion_conv_direct;
         sd_ctx_params.vae_conv_direct         = vae_conv_direct;
         sd_ctx_params.circular_x              = circular || circular_x;
         sd_ctx_params.circular_y              = circular || circular_y;
-        sd_ctx_params.flow_shift              = flow_shift;
         return sd_ctx_params;
     }
 };
@@ -809,13 +794,6 @@ struct SDGenerationParams {
     sd_sample_params_t sample_params;
 
     std::vector<float> custom_sigmas;
-
-    std::string cache_mode;
-    std::string cache_option;
-    std::string cache_preset;
-    std::string scm_mask;
-    bool scm_policy_dynamic = true;
-    sd_cache_params_t cache_params{};
 
     int64_t seed = 42;
 
@@ -962,66 +940,6 @@ struct SDGenerationParams {
             return 1;
         };
 
-        auto on_cache_mode_arg = [&](int argc, const char** argv, int index) {
-            if (++index >= argc) {
-                return -1;
-            }
-            cache_mode = argv_to_utf8(index, argv);
-            if (cache_mode != "easycache" &&
-                cache_mode != "dbcache" && cache_mode != "taylorseer" && cache_mode != "cache-dit") {
-                fprintf(stderr, "error: invalid cache mode '%s', must be 'easycache', 'dbcache', 'taylorseer', or 'cache-dit'\n", cache_mode.c_str());
-                return -1;
-            }
-            return 1;
-        };
-
-        auto on_cache_option_arg = [&](int argc, const char** argv, int index) {
-            if (++index >= argc) {
-                return -1;
-            }
-            cache_option = argv_to_utf8(index, argv);
-            return 1;
-        };
-
-        auto on_scm_mask_arg = [&](int argc, const char** argv, int index) {
-            if (++index >= argc) {
-                return -1;
-            }
-            scm_mask = argv_to_utf8(index, argv);
-            return 1;
-        };
-
-        auto on_scm_policy_arg = [&](int argc, const char** argv, int index) {
-            if (++index >= argc) {
-                return -1;
-            }
-            std::string policy = argv_to_utf8(index, argv);
-            if (policy == "dynamic") {
-                scm_policy_dynamic = true;
-            } else if (policy == "static") {
-                scm_policy_dynamic = false;
-            } else {
-                fprintf(stderr, "error: invalid scm policy '%s', must be 'dynamic' or 'static'\n", policy.c_str());
-                return -1;
-            }
-            return 1;
-        };
-
-        auto on_cache_preset_arg = [&](int argc, const char** argv, int index) {
-            if (++index >= argc) {
-                return -1;
-            }
-            cache_preset = argv_to_utf8(index, argv);
-            if (cache_preset != "slow" && cache_preset != "s" && cache_preset != "S" &&
-                cache_preset != "medium" && cache_preset != "m" && cache_preset != "M" &&
-                cache_preset != "fast" && cache_preset != "f" && cache_preset != "F" &&
-                cache_preset != "ultra" && cache_preset != "u" && cache_preset != "U") {
-                fprintf(stderr, "error: invalid cache preset '%s', must be 'slow'/'s', 'medium'/'m', 'fast'/'f', or 'ultra'/'u'\n", cache_preset.c_str());
-                return -1;
-            }
-            return 1;
-        };
-
         options.manual_options = {
             {"-s",
              "--seed",
@@ -1043,26 +961,6 @@ struct SDGenerationParams {
              "--ref-image",
              "reference image for Flux Kontext models (can be used multiple times)",
              on_ref_image_arg},
-            {"",
-             "--cache-mode",
-             "caching method: 'easycache' (DiT), 'dbcache'/'taylorseer'/'cache-dit' (DiT block-level)",
-             on_cache_mode_arg},
-            {"",
-             "--cache-option",
-             "named cache params (key=value format, comma-separated). easycache/ucache: threshold=,start=,end=,decay=,relative=,reset=; dbcache/taylorseer/cache-dit: Fn=,Bn=,threshold=,warmup=. Examples: \"threshold=0.25\" or \"threshold=1.5,reset=0\"",
-             on_cache_option_arg},
-            {"",
-             "--cache-preset",
-             "cache-dit preset: 'slow'/'s', 'medium'/'m', 'fast'/'f', 'ultra'/'u'",
-             on_cache_preset_arg},
-            {"",
-             "--scm-mask",
-             "SCM steps mask for cache-dit: comma-separated 0/1 (e.g., \"1,1,1,0,0,1,0,0,1,0\") - 1=compute, 0=can cache",
-             on_scm_mask_arg},
-            {"",
-             "--scm-policy",
-             "SCM policy: 'dynamic' (default) or 'static'",
-             on_scm_policy_arg},
 
         };
 
@@ -1104,10 +1002,6 @@ struct SDGenerationParams {
         };
 
         load_if_exists("prompt", prompt);
-        load_if_exists("cache_mode", cache_mode);
-        load_if_exists("cache_option", cache_option);
-        load_if_exists("cache_preset", cache_preset);
-        load_if_exists("scm_mask", scm_mask);
 
         load_if_exists("width", width);
         load_if_exists("height", height);
@@ -1162,112 +1056,6 @@ struct SDGenerationParams {
             return false;
         }
 
-        sd_cache_params_init(&cache_params);
-
-        auto parse_named_params = [&](const std::string& opt_str) -> bool {
-            std::stringstream ss(opt_str);
-            std::string token;
-            while (std::getline(ss, token, ',')) {
-                size_t eq_pos = token.find('=');
-                if (eq_pos == std::string::npos) {
-                    LOG_ERROR("error: cache option '%s' missing '=' separator", token.c_str());
-                    return false;
-                }
-                std::string key = token.substr(0, eq_pos);
-                std::string val = token.substr(eq_pos + 1);
-                try {
-                    if (key == "threshold") {
-                        if (cache_mode == "easycache") {
-                            cache_params.reuse_threshold = std::stof(val);
-                        } else {
-                            cache_params.residual_diff_threshold = std::stof(val);
-                        }
-                    } else if (key == "start") {
-                        cache_params.start_percent = std::stof(val);
-                    } else if (key == "end") {
-                        cache_params.end_percent = std::stof(val);
-                    } else if (key == "decay") {
-                        cache_params.error_decay_rate = std::stof(val);
-                    } else if (key == "relative") {
-                        cache_params.use_relative_threshold = (std::stof(val) != 0.0f);
-                    } else if (key == "reset") {
-                        cache_params.reset_error_on_compute = (std::stof(val) != 0.0f);
-                    } else if (key == "Fn" || key == "fn") {
-                        cache_params.Fn_compute_blocks = std::stoi(val);
-                    } else if (key == "Bn" || key == "bn") {
-                        cache_params.Bn_compute_blocks = std::stoi(val);
-                    } else if (key == "warmup") {
-                        cache_params.max_warmup_steps = std::stoi(val);
-                    } else {
-                        LOG_ERROR("error: unknown cache parameter '%s'", key.c_str());
-                        return false;
-                    }
-                } catch (const std::exception&) {
-                    LOG_ERROR("error: invalid value '%s' for parameter '%s'", val.c_str(), key.c_str());
-                    return false;
-                }
-            }
-            return true;
-        };
-
-        if (!cache_mode.empty()) {
-            if (cache_mode == "easycache") {
-                cache_params.mode                   = SD_CACHE_EASYCACHE;
-                cache_params.reuse_threshold        = 0.2f;
-                cache_params.start_percent          = 0.15f;
-                cache_params.end_percent            = 0.95f;
-                cache_params.error_decay_rate       = 1.0f;
-                cache_params.use_relative_threshold = true;
-                cache_params.reset_error_on_compute = true;
-            } else if (cache_mode == "dbcache") {
-                cache_params.mode                    = SD_CACHE_DBCACHE;
-                cache_params.Fn_compute_blocks       = 8;
-                cache_params.Bn_compute_blocks       = 0;
-                cache_params.residual_diff_threshold = 0.08f;
-                cache_params.max_warmup_steps        = 8;
-            } else if (cache_mode == "taylorseer") {
-                cache_params.mode                    = SD_CACHE_TAYLORSEER;
-                cache_params.Fn_compute_blocks       = 8;
-                cache_params.Bn_compute_blocks       = 0;
-                cache_params.residual_diff_threshold = 0.08f;
-                cache_params.max_warmup_steps        = 8;
-            } else if (cache_mode == "cache-dit") {
-                cache_params.mode                    = SD_CACHE_CACHE_DIT;
-                cache_params.Fn_compute_blocks       = 8;
-                cache_params.Bn_compute_blocks       = 0;
-                cache_params.residual_diff_threshold = 0.08f;
-                cache_params.max_warmup_steps        = 8;
-            }
-
-            if (!cache_option.empty()) {
-                if (!parse_named_params(cache_option)) {
-                    return false;
-                }
-            }
-
-            if (cache_mode == "easycache" || cache_mode == "ucache") {
-                if (cache_params.reuse_threshold < 0.0f) {
-                    LOG_ERROR("error: cache threshold must be non-negative");
-                    return false;
-                }
-                if (cache_params.start_percent < 0.0f || cache_params.start_percent >= 1.0f ||
-                    cache_params.end_percent <= 0.0f || cache_params.end_percent > 1.0f ||
-                    cache_params.start_percent >= cache_params.end_percent) {
-                    LOG_ERROR("error: cache start/end percents must satisfy 0.0 <= start < end <= 1.0");
-                    return false;
-                }
-            }
-        }
-
-        if (cache_params.mode == SD_CACHE_DBCACHE ||
-            cache_params.mode == SD_CACHE_TAYLORSEER ||
-            cache_params.mode == SD_CACHE_CACHE_DIT) {
-            if (!scm_mask.empty()) {
-                cache_params.scm_mask = scm_mask.c_str();
-            }
-            cache_params.scm_policy_dynamic = scm_policy_dynamic;
-        }
-
         sample_params.custom_sigmas             = custom_sigmas.data();
         sample_params.custom_sigmas_count       = static_cast<int>(custom_sigmas.size());
 
@@ -1308,13 +1096,6 @@ struct SDGenerationParams {
             << "  increase_ref_index: " << (increase_ref_index ? "true" : "false") << ",\n"
             << "  sample_params: " << sample_params_str << ",\n"
             << "  custom_sigmas: " << vec_to_string(custom_sigmas) << ",\n"
-            << "  cache_mode: \"" << cache_mode << "\",\n"
-            << "  cache_option: \"" << cache_option << "\",\n"
-            << "  cache: "
-            << (cache_params.mode != SD_CACHE_DISABLED ? "enabled" : "disabled")
-            << " (threshold=" << cache_params.reuse_threshold
-            << ", start=" << cache_params.start_percent
-            << ", end=" << cache_params.end_percent << "),\n"
             << "  seed: " << seed << ",\n"
             << "  upscale_repeats: " << upscale_repeats << ",\n"
             << "  upscale_tile_size: " << upscale_tile_size << ",\n"
