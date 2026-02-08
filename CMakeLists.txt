@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.12)
-project("stable-diffusion")
+project("condenser")
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -43,31 +43,31 @@ option(SD_USE_SYSTEM_GGML            "sd: use system-installed GGML library" OFF
 #option(SD_BUILD_SERVER               "sd: build server example"                           ON)
 
 if(SD_CUDA)
-    message("-- Use CUDA as backend stable-diffusion")
+    message("-- Use CUDA as backend condenser")
     set(GGML_CUDA ON)
     add_definitions(-DSD_USE_CUDA)
 endif()
 
 if(SD_METAL)
-    message("-- Use Metal as backend stable-diffusion")
+    message("-- Use Metal as backend condenser")
     set(GGML_METAL ON)
     add_definitions(-DSD_USE_METAL)
 endif()
 
 if (SD_VULKAN)
-    message("-- Use Vulkan as backend stable-diffusion")
+    message("-- Use Vulkan as backend condenser")
     set(GGML_VULKAN ON)
     add_definitions(-DSD_USE_VULKAN)
 endif ()
 
 if (SD_OPENCL)
-    message("-- Use OpenCL as backend stable-diffusion")
+    message("-- Use OpenCL as backend condenser")
     set(GGML_OPENCL ON)
     add_definitions(-DSD_USE_OPENCL)
 endif ()
 
 if (SD_HIPBLAS)
-    message("-- Use HIPBLAS as backend stable-diffusion")
+    message("-- Use HIPBLAS as backend condenser")
     set(GGML_HIP ON)
     add_definitions(-DSD_USE_CUDA)
     if(SD_FAST_SOFTMAX)
@@ -76,7 +76,7 @@ if (SD_HIPBLAS)
 endif ()
 
 if(SD_MUSA)
-    message("-- Use MUSA as backend stable-diffusion")
+    message("-- Use MUSA as backend condenser")
     set(GGML_MUSA ON)
     add_definitions(-DSD_USE_CUDA)
     if(SD_FAST_SOFTMAX)
@@ -84,7 +84,7 @@ if(SD_MUSA)
     endif()
 endif()
 
-set(SD_LIB stable-diffusion)
+set(SD_LIB condenser)
 
 file(GLOB SD_LIB_SOURCES
     "*.h"
@@ -111,12 +111,12 @@ endif()
 if(NOT SDCPP_BUILD_VERSION)
     set(SDCPP_BUILD_VERSION unknown)
 endif()
-message(STATUS "stable-diffusion.cpp version ${SDCPP_BUILD_VERSION}")
+message(STATUS "condenser.cpp version ${SDCPP_BUILD_VERSION}")
 
 if(NOT SDCPP_BUILD_COMMIT)
     set(SDCPP_BUILD_COMMIT unknown)
 endif()
-message(STATUS "stable-diffusion.cpp commit ${SDCPP_BUILD_COMMIT}")
+message(STATUS "condenser.cpp commit ${SDCPP_BUILD_COMMIT}")
 
 set_property(
   SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/version.cpp
@@ -143,7 +143,7 @@ else()
 endif()
 
 if(SD_SYCL)
-    message("-- Use SYCL as backend stable-diffusion")
+    message("-- Use SYCL as backend condenser")
     set(GGML_SYCL ON)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-narrowing -fsycl")
     add_definitions(-DSD_USE_SYCL)
@@ -190,7 +190,7 @@ if (SD_BUILD_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
-set(SD_PUBLIC_HEADERS stable-diffusion.h)
+set(SD_PUBLIC_HEADERS condenser.h)
 set_target_properties(${SD_LIB} PROPERTIES PUBLIC_HEADER "${SD_PUBLIC_HEADERS}")
 
 install(TARGETS ${SD_LIB} LIBRARY PUBLIC_HEADER)

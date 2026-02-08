@@ -1,6 +1,6 @@
-# sd-engine — Persistent Inference Engine
+# cn-engine — Persistent Inference Engine
 
-`sd-engine` is a persistent inference process that reads JSON commands from stdin and writes JSON responses to stdout. Unlike the CLI (`sd-cli`), which loads and unloads the model for every invocation, `sd-engine` keeps the model resident in VRAM between generations — delivering **3-5× faster** repeat generations with the same model.
+`cn-engine` is a persistent inference process that reads JSON commands from stdin and writes JSON responses to stdout. Unlike the CLI (`cn-cli`), which loads and unloads the model for every invocation, `cn-engine` keeps the model resident in VRAM between generations — delivering **3-5× faster** repeat generations with the same model.
 
 ## Quick Start
 
@@ -11,18 +11,18 @@ cmake .. -DSD_VULKAN=ON    # or -DSD_CUBLAS=ON for CUDA
 cmake --build . --config Release
 
 # Test with a ping
-echo '{"cmd":"ping","id":"1"}' | ./bin/sd-engine
+echo '{"cmd":"ping","id":"1"}' | ./bin/cn-engine
 # → {"id":"1","type":"ok","data":{"status":"pong"}}
 ```
 
 ## Usage
 
-`sd-engine` is designed to be spawned as a child process. The parent writes JSON commands to the engine's stdin (one per line) and reads JSON responses from stdout (one per line). All human-readable log output goes to stderr.
+`cn-engine` is designed to be spawned as a child process. The parent writes JSON commands to the engine's stdin (one per line) and reads JSON responses from stdout (one per line). All human-readable log output goes to stderr.
 
 ### Interactive Example
 
 ```bash
-./bin/sd-engine
+./bin/cn-engine
 # Then type commands, one JSON object per line:
 {"cmd":"ping","id":"1"}
 {"cmd":"load","id":"2","params":{"diffusion_model":"/path/to/model.gguf","vae":"/path/to/ae.safetensors","llm":"/path/to/qwen.gguf"}}
@@ -36,7 +36,7 @@ The second `generate` command will be **much faster** because the model is alrea
 ### Piping Commands from a File
 
 ```bash
-cat commands.jsonl | ./bin/sd-engine 2>engine.log
+cat commands.jsonl | ./bin/cn-engine 2>engine.log
 ```
 
 ## Protocol Reference
@@ -215,13 +215,13 @@ Error codes: `PARSE_ERROR`, `UNKNOWN_CMD`, `NO_MODEL`, `CTX_CREATION_FAILED`, `R
 
 ## Performance
 
-| Workflow | sd-cli | sd-engine |
+| Workflow | cn-cli | cn-engine |
 |----------|--------|-----------|
 | First generation (cold start) | 12s | 12s |
 | Same model, new seed | 12s | **3-4s** |
 | Same model + prompt, new seed | 12s | **3-4s** |
 
-The speedup comes from keeping the model in VRAM. With `sd-cli`, every invocation loads ~4-8 GB of model weights from disk into VRAM. With `sd-engine`, this happens once and subsequent generations go straight to inference.
+The speedup comes from keeping the model in VRAM. With `cn-cli`, every invocation loads ~4-8 GB of model weights from disk into VRAM. With `cn-engine`, this happens once and subsequent generations go straight to inference.
 
 ## Integration Examples
 
@@ -231,7 +231,7 @@ The speedup comes from keeping the model in VRAM. With `sd-cli`, every invocatio
 import subprocess, json
 
 engine = subprocess.Popen(
-    ["./sd-engine"],
+    ["./cn-engine"],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     text=True, bufsize=1
 )
@@ -275,7 +275,7 @@ engine.wait()
 
 ```javascript
 const { spawn } = require('child_process');
-const engine = spawn('./sd-engine', [], { stdio: ['pipe', 'pipe', 'pipe'] });
+const engine = spawn('./cn-engine', [], { stdio: ['pipe', 'pipe', 'pipe'] });
 
 let buffer = '';
 engine.stdout.on('data', (chunk) => {
@@ -364,6 +364,6 @@ The engine also caches VAE-encoded latent representations of reference images. W
 ## Version
 
 ```bash
-./sd-engine --version
-# sd-engine 0.1.0 (abc1234)
+./cn-engine --version
+# cn-engine 0.1.0 (abc1234)
 ```

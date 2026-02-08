@@ -1,5 +1,5 @@
-#ifndef __STABLE_DIFFUSION_H__
-#define __STABLE_DIFFUSION_H__
+#ifndef __CONDENSER_H__
+#define __CONDENSER_H__
 
 #if defined(_WIN32) || defined(__CYGWIN__)
 #ifndef SD_BUILD_SHARED_LIB
@@ -280,4 +280,4 @@ SD_API const char* sd_version(void);
 }
 #endif
 
-#endif  // __STABLE_DIFFUSION_H__
+#endif  // __CONDENSER_H__

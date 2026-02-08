@@ -1,7 +1,7 @@
 #include "esrgan.hpp"
 #include "ggml_extend.hpp"
 #include "model.h"
-#include "stable-diffusion.h"
+#include "condenser.h"
 
 struct UpscalerGGML {
     ggml_backend_t backend    = nullptr;  // general backend

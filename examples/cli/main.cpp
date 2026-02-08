@@ -13,7 +13,7 @@
 #include <vector>
 
 // #include "preprocessing.hpp"
-#include "stable-diffusion.h"
+#include "condenser.h"
 
 #include "common/common.hpp"
 
@@ -232,7 +232,7 @@ std::string get_image_params(const SDCliParams& cli_params, const SDContextParam
     if (!ctx_params.vae_path.empty()) {
         parameter_string += "VAE: " + sd_basename(ctx_params.vae_path) + ", ";
     }
-    parameter_string += "Version: stable-diffusion.cpp";
+    parameter_string += "Version: condenser.cpp";
     return parameter_string;
 }
 

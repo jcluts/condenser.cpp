@@ -1,4 +1,4 @@
-#include "stable-diffusion.h"
+#include "condenser.h"
 
 #ifndef SDCPP_BUILD_COMMIT
 #define SDCPP_BUILD_COMMIT unknown

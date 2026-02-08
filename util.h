@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-#include "stable-diffusion.h"
+#include "condenser.h"
 
 #define SAFE_STR(s) ((s) ? (s) : "")
 #define BOOL_STR(b) ((b) ? "true" : "false")

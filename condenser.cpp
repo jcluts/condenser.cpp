@@ -3,7 +3,7 @@
 #include "model.h"
 #include "rng.hpp"
 #include "rng_philox.hpp"
-#include "stable-diffusion.h"
+#include "condenser.h"
 #include "util.h"
 
 #include "conditioner.hpp"
@@ -1263,7 +1263,7 @@ sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
                                     const sd_condition_t* precomputed_condition = nullptr) {
     if (seed < 0) {
         // Generally, when using the provided command line, the seed is always >0.
-        // However, to prevent potential issues if 'stable-diffusion.cpp' is invoked as a library
+        // However, to prevent potential issues if 'condenser.cpp' is invoked as a library
         // by a third party with a seed <0, let's incorporate randomization here.
         srand((int)time(nullptr));
         seed = rand();

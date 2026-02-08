@@ -17,7 +17,7 @@ namespace fs = std::filesystem;
 #include <windows.h>
 #endif  // _WIN32
 
-#include "stable-diffusion.h"
+#include "condenser.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STB_IMAGE_STATIC

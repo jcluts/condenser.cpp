@@ -1,5 +1,5 @@
 /*
- * sd-engine: Persistent inference engine with JSON-over-stdio protocol
+ * cn-engine: Persistent inference engine with JSON-over-stdio protocol
  *
  * Keeps an sd_ctx_t* alive between commands so the model stays loaded in VRAM.
  * Reads newline-delimited JSON commands from stdin, writes JSON responses
@@ -17,7 +17,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "stable-diffusion.h"
+#include "condenser.h"
 
 // common.hpp pulls in nlohmann/json (thirdparty/json.hpp), stb_image,
 // stb_image_write, stb_image_resize, and the SDContextParams /
@@ -763,7 +763,7 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
 int main(int argc, const char* argv[]) {
     // Version flag for quick checks
     if (argc > 1 && std::string(argv[1]) == "--version") {
-        std::cout << "sd-engine " << sd_version() << " (" << sd_commit() << ")" << std::endl;
+        std::cout << "cn-engine " << sd_version() << " (" << sd_commit() << ")" << std::endl;
         return 0;
     }
 
@@ -773,7 +773,7 @@ int main(int argc, const char* argv[]) {
     // Redirect all library log output to stderr, keeping stdout clean for JSON protocol
     sd_set_log_callback(stderr_log_cb, nullptr);
 
-    fprintf(stderr, "[INFO ] sd-engine %s (%s) started. Awaiting JSON commands on stdin.\n",
+    fprintf(stderr, "[INFO ] cn-engine %s (%s) started. Awaiting JSON commands on stdin.\n",
             sd_version(), sd_commit());
     fflush(stderr);
 
@@ -829,7 +829,7 @@ int main(int argc, const char* argv[]) {
         state.ctx = nullptr;
     }
 
-    fprintf(stderr, "[INFO ] sd-engine exiting.\n");
+    fprintf(stderr, "[INFO ] cn-engine exiting.\n");
     fflush(stderr);
     return 0;
 }

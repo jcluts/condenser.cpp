@@ -14,7 +14,7 @@
 
 #include "gguf_reader.hpp"
 #include "model.h"
-#include "stable-diffusion.h"
+#include "condenser.h"
 #include "util.h"
 #include "vocab_qwen.hpp"
 
@@ -24,7 +24,7 @@
 #include "ggml.h"
 
 #include "name_conversion.h"
-#include "stable-diffusion.h"
+#include "condenser.h"
 
 #ifdef SD_USE_METAL
 #include "ggml-metal.h"
