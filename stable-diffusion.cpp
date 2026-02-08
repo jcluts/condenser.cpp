@@ -1419,13 +1419,43 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
         return nullptr;
     }
 
-    struct ggml_init_params params;
-    params.mem_size   = static_cast<size_t>(1024 * 1024) * 1024;  // 1G
-    params.mem_buffer = nullptr;
-    params.no_alloc   = false;
-    // LOG_DEBUG("mem_size %u ", params.mem_size);
+    // I3: Right-size work context based on image dimensions and ref count
+    // instead of unconditionally allocating 1 GB
+    struct ggml_context* work_ctx = nullptr;
+    {
+        const int vae_sf   = sd_ctx->sd->get_vae_scale_factor();
+        const int lat_ch   = sd_ctx->sd->get_latent_channel();
+        const size_t lat_w = (size_t)(width / vae_sf);
+        const size_t lat_h = (size_t)(height / vae_sf);
 
-    struct ggml_context* work_ctx = ggml_init(params);
+        const size_t latent_bytes  = lat_w * lat_h * lat_ch * sizeof(float);
+        const size_t decoded_bytes = (size_t)width * height * 3 * sizeof(float);
+
+        // Reference latents only (pixel tensors freed via I1 temp context)
+        size_t ref_latent_bytes = 0;
+        for (int i = 0; i < sd_img_gen_params->ref_images_count; i++) {
+            size_t rlw = sd_img_gen_params->ref_images[i].width / vae_sf;
+            size_t rlh = sd_img_gen_params->ref_images[i].height / vae_sf;
+            ref_latent_bytes += rlw * rlh * lat_ch * sizeof(float);
+        }
+
+        // Budget: multiple latent copies + decoded image + refs + headroom
+        size_t budget = latent_bytes * 8 + decoded_bytes + ref_latent_bytes
+                      + 128 * 1024 * 1024;  // 128 MB headroom for conditioning etc.
+        budget = std::max(budget, (size_t)(256 * 1024 * 1024));              // min 256 MB
+        budget = std::min(budget, (size_t)(1024) * (size_t)(1024 * 1024));   // cap 1 GB
+
+        LOG_DEBUG("work_ctx budget: %.1f MB (latent=%.1f MB, decoded=%.1f MB, refs=%.1f MB)",
+                  budget / (1024.0 * 1024.0), latent_bytes / (1024.0 * 1024.0),
+                  decoded_bytes / (1024.0 * 1024.0), ref_latent_bytes / (1024.0 * 1024.0));
+
+        struct ggml_init_params params;
+        params.mem_size   = budget;
+        params.mem_buffer = nullptr;
+        params.no_alloc   = false;
+
+        work_ctx = ggml_init(params);
+    }
     if (!work_ctx) {
         LOG_ERROR("ggml_init() failed");
         return nullptr;
@@ -1489,20 +1519,37 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
         LOG_INFO("EDIT mode");
     }
 
+    // I1: Encode ref images using a temporary context for pixel tensors.
+    // The latent output is allocated in work_ctx; the pixel tensor (~12 MB per
+    // 1024x1024 ref) is freed immediately after encoding instead of persisting
+    // as dead weight throughout the entire denoising + VAE decode pipeline.
     std::vector<ggml_tensor*> ref_latents;
-    for (int i = 0; i < ref_images.size(); i++) {
-        ggml_tensor* img = ggml_new_tensor_4d(work_ctx,
+    for (size_t i = 0; i < ref_images.size(); i++) {
+        // Temporary context: pixel tensor + 4 MB headroom for ggml overhead
+        size_t img_bytes = (size_t)ref_images[i]->width * ref_images[i]->height * 3 * sizeof(float);
+        struct ggml_init_params enc_params;
+        enc_params.mem_size   = img_bytes + 4 * 1024 * 1024;
+        enc_params.mem_buffer = nullptr;
+        enc_params.no_alloc   = false;
+        struct ggml_context* enc_ctx = ggml_init(enc_params);
+        if (!enc_ctx) {
+            LOG_ERROR("failed to allocate temp context for ref image %zu", i);
+            continue;
+        }
+
+        ggml_tensor* img = ggml_new_tensor_4d(enc_ctx,
                                               GGML_TYPE_F32,
                                               ref_images[i]->width,
                                               ref_images[i]->height,
-                                              3,
-                                              1);
+                                              3, 1);
         sd_image_to_ggml_tensor(*ref_images[i], img);
 
-        // print_ggml_tensor(img, false, "img");
-
+        // Latent is allocated in work_ctx; img is only read during compute()
         ggml_tensor* latent = sd_ctx->sd->encode_first_stage(work_ctx, img);
         ref_latents.push_back(latent);
+
+        // Free pixel tensor immediately — saves ~12 MB per 1024x1024 ref
+        ggml_free(enc_ctx);
     }
 
     if (sd_img_gen_params->ref_images_count > 0) {
@@ -1618,12 +1665,38 @@ sd_image_t* generate_image_with_condition(sd_ctx_t* sd_ctx,
 
     LOG_DEBUG("generate_image_with_condition %dx%d", width, height);
 
-    struct ggml_init_params params;
-    params.mem_size   = static_cast<size_t>(1024 * 1024) * 1024;  // 1G
-    params.mem_buffer = nullptr;
-    params.no_alloc   = false;
+    // I3: Right-size work context
+    struct ggml_context* work_ctx = nullptr;
+    {
+        const int vae_sf   = sd_ctx->sd->get_vae_scale_factor();
+        const int lat_ch   = sd_ctx->sd->get_latent_channel();
+        const size_t lat_w = (size_t)(width / vae_sf);
+        const size_t lat_h = (size_t)(height / vae_sf);
 
-    struct ggml_context* work_ctx = ggml_init(params);
+        const size_t latent_bytes  = lat_w * lat_h * lat_ch * sizeof(float);
+        const size_t decoded_bytes = (size_t)width * height * 3 * sizeof(float);
+
+        size_t ref_latent_bytes = 0;
+        for (int i = 0; i < sd_img_gen_params->ref_images_count; i++) {
+            size_t rlw = sd_img_gen_params->ref_images[i].width / vae_sf;
+            size_t rlh = sd_img_gen_params->ref_images[i].height / vae_sf;
+            ref_latent_bytes += rlw * rlh * lat_ch * sizeof(float);
+        }
+
+        size_t budget = latent_bytes * 8 + decoded_bytes + ref_latent_bytes
+                      + 128 * 1024 * 1024;
+        budget = std::max(budget, (size_t)(256 * 1024 * 1024));
+        budget = std::min(budget, (size_t)(1024) * (size_t)(1024 * 1024));
+
+        LOG_DEBUG("work_ctx budget: %.1f MB", budget / (1024.0 * 1024.0));
+
+        struct ggml_init_params params;
+        params.mem_size   = budget;
+        params.mem_buffer = nullptr;
+        params.no_alloc   = false;
+
+        work_ctx = ggml_init(params);
+    }
     if (!work_ctx) {
         LOG_ERROR("ggml_init() failed");
         return nullptr;
@@ -1683,16 +1756,28 @@ sd_image_t* generate_image_with_condition(sd_ctx_t* sd_ctx,
         ref_images.push_back(&sd_img_gen_params->ref_images[i]);
     }
 
+    // I1: Use temp context for pixel tensors — freed immediately after encoding
     std::vector<ggml_tensor*> ref_latents;
     for (int i = 0; i < (int)ref_images.size(); i++) {
-        ggml_tensor* img = ggml_new_tensor_4d(work_ctx,
-                                              GGML_TYPE_F32,
-                                              ref_images[i]->width,
-                                              ref_images[i]->height,
+        size_t img_bytes = (size_t)ref_images[i]->width * ref_images[i]->height * 3 * sizeof(float);
+        struct ggml_init_params enc_params;
+        enc_params.mem_size   = img_bytes + 4 * 1024 * 1024;
+        enc_params.mem_buffer = nullptr;
+        enc_params.no_alloc   = false;
+        struct ggml_context* enc_ctx = ggml_init(enc_params);
+        if (!enc_ctx) {
+            LOG_ERROR("failed to allocate temp context for ref image %d", i);
+            continue;
+        }
+
+        ggml_tensor* img = ggml_new_tensor_4d(enc_ctx, GGML_TYPE_F32,
+                                              ref_images[i]->width, ref_images[i]->height,
                                               3, 1);
         sd_image_to_ggml_tensor(*ref_images[i], img);
         ggml_tensor* latent = sd_ctx->sd->encode_first_stage(work_ctx, img);
         ref_latents.push_back(latent);
+
+        ggml_free(enc_ctx);
     }
 
     if (sd_img_gen_params->ref_images_count > 0) {
@@ -1803,12 +1888,38 @@ sd_image_t* generate_image_with_condition_and_latents(
 
     LOG_DEBUG("generate_image_with_condition_and_latents %dx%d", width, height);
 
-    struct ggml_init_params params;
-    params.mem_size   = static_cast<size_t>(1024 * 1024) * 1024;  // 1G
-    params.mem_buffer = nullptr;
-    params.no_alloc   = false;
+    // I3: Right-size work context
+    struct ggml_context* work_ctx = nullptr;
+    {
+        const int vae_sf   = sd_ctx->sd->get_vae_scale_factor();
+        const int lat_ch   = sd_ctx->sd->get_latent_channel();
+        const size_t lat_w = (size_t)(width / vae_sf);
+        const size_t lat_h = (size_t)(height / vae_sf);
 
-    struct ggml_context* work_ctx = ggml_init(params);
+        const size_t latent_bytes  = lat_w * lat_h * lat_ch * sizeof(float);
+        const size_t decoded_bytes = (size_t)width * height * 3 * sizeof(float);
+
+        size_t ref_latent_bytes = 0;
+        for (int i = 0; i < sd_img_gen_params->ref_images_count; i++) {
+            size_t rlw = sd_img_gen_params->ref_images[i].width / vae_sf;
+            size_t rlh = sd_img_gen_params->ref_images[i].height / vae_sf;
+            ref_latent_bytes += rlw * rlh * lat_ch * sizeof(float);
+        }
+
+        size_t budget = latent_bytes * 8 + decoded_bytes + ref_latent_bytes
+                      + 128 * 1024 * 1024;
+        budget = std::max(budget, (size_t)(256 * 1024 * 1024));
+        budget = std::min(budget, (size_t)(1024) * (size_t)(1024 * 1024));
+
+        LOG_DEBUG("work_ctx budget: %.1f MB", budget / (1024.0 * 1024.0));
+
+        struct ggml_init_params params;
+        params.mem_size   = budget;
+        params.mem_buffer = nullptr;
+        params.no_alloc   = false;
+
+        work_ctx = ggml_init(params);
+    }
     if (!work_ctx) {
         LOG_ERROR("ggml_init() failed");
         return nullptr;
@@ -1878,27 +1989,52 @@ sd_image_t* generate_image_with_condition_and_latents(
                 ref_latents.push_back(lat);
             } else {
                 LOG_WARN("failed to deserialize cached latent %d, falling back to encode", i);
-                // Fall back: encode this image from params
+                // I1: Fall back with temp context for pixel tensor
                 if (i < sd_img_gen_params->ref_images_count) {
-                    ggml_tensor* img = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32,
-                                                          sd_img_gen_params->ref_images[i].width,
-                                                          sd_img_gen_params->ref_images[i].height,
-                                                          3, 1);
-                    sd_image_to_ggml_tensor(sd_img_gen_params->ref_images[i], img);
-                    ggml_tensor* latent = sd_ctx->sd->encode_first_stage(work_ctx, img);
-                    ref_latents.push_back(latent);
+                    size_t img_bytes = (size_t)sd_img_gen_params->ref_images[i].width
+                                     * sd_img_gen_params->ref_images[i].height * 3 * sizeof(float);
+                    struct ggml_init_params enc_params;
+                    enc_params.mem_size   = img_bytes + 4 * 1024 * 1024;
+                    enc_params.mem_buffer = nullptr;
+                    enc_params.no_alloc   = false;
+                    struct ggml_context* enc_ctx = ggml_init(enc_params);
+                    if (enc_ctx) {
+                        ggml_tensor* img = ggml_new_tensor_4d(enc_ctx, GGML_TYPE_F32,
+                                                              sd_img_gen_params->ref_images[i].width,
+                                                              sd_img_gen_params->ref_images[i].height,
+                                                              3, 1);
+                        sd_image_to_ggml_tensor(sd_img_gen_params->ref_images[i], img);
+                        ggml_tensor* latent = sd_ctx->sd->encode_first_stage(work_ctx, img);
+                        ref_latents.push_back(latent);
+                        ggml_free(enc_ctx);
+                    } else {
+                        LOG_ERROR("failed to allocate temp context for fallback ref image %d", i);
+                    }
                 }
             }
         }
     } else {
-        // No cached latents — encode reference images as usual
+        // No cached latents — encode reference images with temp contexts (I1)
         for (int i = 0; i < (int)ref_images.size(); i++) {
-            ggml_tensor* img = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32,
+            size_t img_bytes = (size_t)ref_images[i]->width * ref_images[i]->height * 3 * sizeof(float);
+            struct ggml_init_params enc_params;
+            enc_params.mem_size   = img_bytes + 4 * 1024 * 1024;
+            enc_params.mem_buffer = nullptr;
+            enc_params.no_alloc   = false;
+            struct ggml_context* enc_ctx = ggml_init(enc_params);
+            if (!enc_ctx) {
+                LOG_ERROR("failed to allocate temp context for ref image %d", i);
+                continue;
+            }
+
+            ggml_tensor* img = ggml_new_tensor_4d(enc_ctx, GGML_TYPE_F32,
                                                   ref_images[i]->width, ref_images[i]->height,
                                                   3, 1);
             sd_image_to_ggml_tensor(*ref_images[i], img);
             ggml_tensor* latent = sd_ctx->sd->encode_first_stage(work_ctx, img);
             ref_latents.push_back(latent);
+
+            ggml_free(enc_ctx);
         }
         if (sd_img_gen_params->ref_images_count > 0) {
             size_t t1 = ggml_time_ms();

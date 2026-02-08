@@ -299,10 +299,33 @@ __STATIC_INLINE__ void sd_image_to_ggml_tensor(sd_image_t image,
     GGML_ASSERT(image.channel == tensor->ne[2]);
     GGML_ASSERT(1 == tensor->ne[3]);
     GGML_ASSERT(tensor->type == GGML_TYPE_F32);
-    ggml_ext_tensor_iter(tensor, [&](ggml_tensor* tensor, int64_t i0, int64_t i1, int64_t i2, int64_t i3) {
-        float value = sd_image_get_f32(image, i0, i1, i2, scale);
-        ggml_ext_tensor_set_f32(tensor, value, i0, i1, i2, i3);
-    });
+
+    // Direct pointer arithmetic — avoids ~3M std::function dispatches + per-element
+    // accessor overhead for a 1024x1024x3 image (I2 optimization)
+    float* dst           = (float*)tensor->data;
+    const uint8_t* src   = image.data;
+    const float inv_255  = 1.0f / 255.0f;
+    const int64_t W      = (int64_t)image.width;
+    const int64_t H      = (int64_t)image.height;
+    const int64_t C      = (int64_t)image.channel;
+
+    // sd_image layout: row-major [H][W][C] interleaved (HWC)
+    // ggml tensor layout: ne[0]=W innermost, then H, then C (planar CHW)
+    for (int64_t c = 0; c < C; c++) {
+        for (int64_t h = 0; h < H; h++) {
+            const uint8_t* src_row = src + h * W * C + c;
+            float* dst_row         = dst + c * H * W + h * W;
+            if (scale) {
+                for (int64_t w = 0; w < W; w++) {
+                    dst_row[w] = (float)src_row[w * C] * inv_255;
+                }
+            } else {
+                for (int64_t w = 0; w < W; w++) {
+                    dst_row[w] = (float)src_row[w * C];
+                }
+            }
+        }
+    }
 }
 
 __STATIC_INLINE__ void sd_image_f32_to_ggml_tensor(sd_image_f32_t image,
@@ -313,10 +336,30 @@ __STATIC_INLINE__ void sd_image_f32_to_ggml_tensor(sd_image_f32_t image,
     GGML_ASSERT(image.channel == tensor->ne[2]);
     GGML_ASSERT(1 == tensor->ne[3]);
     GGML_ASSERT(tensor->type == GGML_TYPE_F32);
-    ggml_ext_tensor_iter(tensor, [&](ggml_tensor* tensor, int64_t i0, int64_t i1, int64_t i2, int64_t i3) {
-        float value = sd_image_get_f32(image, i0, i1, i2, scale);
-        ggml_ext_tensor_set_f32(tensor, value, i0, i1, i2, i3);
-    });
+
+    // Direct pointer arithmetic (mirrors sd_image_to_ggml_tensor optimization)
+    float* dst           = (float*)tensor->data;
+    const float* src     = image.data;
+    const float inv_255  = 1.0f / 255.0f;
+    const int64_t W      = (int64_t)image.width;
+    const int64_t H      = (int64_t)image.height;
+    const int64_t C      = (int64_t)image.channel;
+
+    for (int64_t c = 0; c < C; c++) {
+        for (int64_t h = 0; h < H; h++) {
+            const float* src_row = src + h * W * C + c;
+            float* dst_row       = dst + c * H * W + h * W;
+            if (scale) {
+                for (int64_t w = 0; w < W; w++) {
+                    dst_row[w] = src_row[w * C] * inv_255;
+                }
+            } else {
+                for (int64_t w = 0; w < W; w++) {
+                    dst_row[w] = src_row[w * C];
+                }
+            }
+        }
+    }
 }
 
 __STATIC_INLINE__ void ggml_ext_tensor_split_2d(struct ggml_tensor* input,
