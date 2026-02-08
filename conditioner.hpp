@@ -174,16 +174,18 @@ struct LLMEmbedder : public Conditioner {
 
         ggml_tensor* attention_mask = nullptr;
         if (!mask.empty()) {
-            attention_mask = ggml_new_tensor_2d(work_ctx, GGML_TYPE_F32, mask.size(), mask.size());
-            ggml_ext_tensor_iter(attention_mask, [&](ggml_tensor* attention_mask, int64_t i0, int64_t i1, int64_t i2, int64_t i3) {
-                float value = 0.f;
-                if (mask[i0] == 0.f) {
-                    value = -INFINITY;
-                } else if (i0 > i1) {
-                    value = -INFINITY;
+            int seq_len    = (int)mask.size();
+            attention_mask  = ggml_new_tensor_2d(work_ctx, GGML_TYPE_F32, seq_len, seq_len);
+            float* mask_data = (float*)attention_mask->data;
+            // Direct memory fill instead of per-element callback via ggml_ext_tensor_iter.
+            // Memory layout: mask_data[i1 * seq_len + i0] = element at (i0, i1).
+            // Set -INFINITY where mask[i0]==0 (padding) or i0>i1 (causal).
+            for (int i1 = 0; i1 < seq_len; i1++) {
+                float* row = mask_data + i1 * seq_len;
+                for (int i0 = 0; i0 < seq_len; i0++) {
+                    row[i0] = (mask[i0] == 0.f || i0 > i1) ? -INFINITY : 0.f;
                 }
-                ggml_ext_tensor_set_f32(attention_mask, value, i0, i1, i2, i3);
-            });
+            }
         }
 
         llm->compute(n_threads,
@@ -196,19 +198,23 @@ struct LLMEmbedder : public Conditioner {
             auto tensor = hidden_states;
 
             // Ensure weights vector matches the sequence length
-            if (weights.size() < tensor->ne[1]) {
+            if ((int64_t)weights.size() < tensor->ne[1]) {
                 LOG_WARN("LLMEmbedder: weights.size()=%zu < hidden_states.ne[1]=%lld, padding weights with 1.0",
                         weights.size(), tensor->ne[1]);
                 weights.resize(tensor->ne[1], 1.0f);
             }
 
             float original_mean = ggml_ext_tensor_mean(tensor);
+            // Use raw pointer with stride-based access instead of per-element get/set
+            float* data = (float*)tensor->data;
+            int64_t stride1 = tensor->nb[1] / sizeof(float);
+            int64_t stride2 = tensor->nb[2] / sizeof(float);
             for (int i2 = 0; i2 < tensor->ne[2]; i2++) {
                 for (int i1 = 0; i1 < tensor->ne[1]; i1++) {
+                    float w = weights[i1];
+                    float* row = data + i2 * stride2 + i1 * stride1;
                     for (int i0 = 0; i0 < tensor->ne[0]; i0++) {
-                        float value = ggml_ext_tensor_get_f32(tensor, i0, i1, i2);
-                        value *= weights[i1];
-                        ggml_ext_tensor_set_f32(tensor, value, i0, i1, i2);
+                        row[i0] *= w;
                     }
                 }
             }

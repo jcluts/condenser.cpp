@@ -153,17 +153,6 @@ const char* sampling_methods_str[] = {
     "Euler",
     "Euler A",
     "Heun",
-    "DPM2",
-    "DPM++ (2s)",
-    "DPM++ (2M)",
-    "modified DPM++ (2M)",
-    "iPNDM",
-    "iPNDM_v",
-    "LCM",
-    "DDIM \"trailing\"",
-    "TCD",
-    "Res Multistep",
-    "Res 2s",
 };
 
 /*================================================== Helper Functions ================================================*/
