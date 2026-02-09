@@ -90,7 +90,7 @@ echo '{"cmd":"ping","id":"1"}' | ./build/bin/cn-engine
 
 The second generate is fast — the model stays loaded and the prompt conditioning is cached from the first run.
 
-See [examples/engine/README.md](examples/engine/README.md) for the full protocol reference, caching behavior, and integration examples (Python, Node.js).
+See [tools/engine/README.md](tools/engine/README.md) for the full protocol reference, caching behavior, and integration examples (Python, Node.js).
 
 ## Performance
 

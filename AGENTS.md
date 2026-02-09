@@ -57,13 +57,13 @@ Components are offloaded to GPU one at a time via `offload_params_to_runtime_bac
 - `sd_compute_condition()` / `generate_image_with_condition()` — split API for caching prompt encodings
 - `sd_encode_ref_image()` / `generate_image_with_condition_and_latents()` — split API for caching VAE-encoded reference images
 
-### Engine (`examples/engine/main.cpp`)
+### Engine (`tools/engine/main.cpp`)
 
 JSON-over-stdio protocol (NDJSON). Reads commands from stdin, writes responses to stdout, logs to stderr. Keeps `sd_ctx_t*` alive between generations for fast re-use. Includes LRU caches for prompt conditioning and VAE latents.
 
-### CLI (`examples/cli/main.cpp`)
+### CLI (`tools/cli/main.cpp`)
 
-Single-shot: parse args → load model → generate → save PNG → exit. Uses shared param structs from `examples/common/common.hpp`.
+Single-shot: parse args → load model → generate → save PNG → exit. Uses shared param structs from `tools/common/common.hpp`.
 
 ### Model Loading (`model.h` / `model.cpp`)
 
