@@ -29,11 +29,6 @@ static inline bool sd_version_is_flux2(SDVersion version) {
     return version == VERSION_FLUX2 || version == VERSION_FLUX2_KLEIN;
 }
 
-// Flux 2 Klein is always a DiT
-static inline bool sd_version_is_dit(SDVersion version) {
-    return sd_version_is_flux2(version);
-}
-
 struct TensorStorage {
     std::string name;
     ggml_type type          = GGML_TYPE_F32;

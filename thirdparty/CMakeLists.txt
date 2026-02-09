@@ -1,3 +1,2 @@
-set(Z_TARGET zip)
-add_library(${Z_TARGET} OBJECT zip.c zip.h miniz.h)
-target_include_directories(${Z_TARGET} PUBLIC .)
+# Header-only thirdparty libraries (stb, json, etc.)
+# Included directly via target_include_directories in parent CMakeLists.txt

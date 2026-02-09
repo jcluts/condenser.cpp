@@ -470,66 +470,6 @@ const char* sd_get_system_info() {
     return buffer;
 }
 
-sd_image_f32_t sd_image_t_to_sd_image_f32_t(sd_image_t image) {
-    sd_image_f32_t converted_image;
-    converted_image.width   = image.width;
-    converted_image.height  = image.height;
-    converted_image.channel = image.channel;
-
-    // Allocate memory for float data
-    converted_image.data = (float*)malloc(image.width * image.height * image.channel * sizeof(float));
-
-    for (uint32_t i = 0; i < image.width * image.height * image.channel; i++) {
-        // Convert uint8_t to float
-        converted_image.data[i] = (float)image.data[i];
-    }
-
-    return converted_image;
-}
-
-// Function to perform double linear interpolation
-float interpolate(float v1, float v2, float v3, float v4, float x_ratio, float y_ratio) {
-    return v1 * (1 - x_ratio) * (1 - y_ratio) + v2 * x_ratio * (1 - y_ratio) + v3 * (1 - x_ratio) * y_ratio + v4 * x_ratio * y_ratio;
-}
-
-sd_image_f32_t resize_sd_image_f32_t(sd_image_f32_t image, int target_width, int target_height) {
-    sd_image_f32_t resized_image;
-    resized_image.width   = target_width;
-    resized_image.height  = target_height;
-    resized_image.channel = image.channel;
-
-    // Allocate memory for resized float data
-    resized_image.data = (float*)malloc(target_width * target_height * image.channel * sizeof(float));
-
-    for (int y = 0; y < target_height; y++) {
-        for (int x = 0; x < target_width; x++) {
-            float original_x = (float)x * image.width / target_width;
-            float original_y = (float)y * image.height / target_height;
-
-            uint32_t x1 = (uint32_t)original_x;
-            uint32_t y1 = (uint32_t)original_y;
-            uint32_t x2 = std::min(x1 + 1, image.width - 1);
-            uint32_t y2 = std::min(y1 + 1, image.height - 1);
-
-            for (uint32_t k = 0; k < image.channel; k++) {
-                float v1 = *(image.data + y1 * image.width * image.channel + x1 * image.channel + k);
-                float v2 = *(image.data + y1 * image.width * image.channel + x2 * image.channel + k);
-                float v3 = *(image.data + y2 * image.width * image.channel + x1 * image.channel + k);
-                float v4 = *(image.data + y2 * image.width * image.channel + x2 * image.channel + k);
-
-                float x_ratio = original_x - x1;
-                float y_ratio = original_y - y1;
-
-                float value = interpolate(v1, v2, v3, v4, x_ratio, y_ratio);
-
-                *(resized_image.data + y * target_width * image.channel + x * image.channel + k) = value;
-            }
-        }
-    }
-
-    return resized_image;
-}
-
 // Ref: https://github.com/AUTOMATIC1111/stable-diffusion-webui/blob/cad87bf4e3e0b0a759afa94e933527c3123d59bc/modules/prompt_parser.py#L345
 //
 // Parses a string with attention tokens and returns a list of pairs: text and its associated weight.

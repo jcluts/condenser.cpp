@@ -628,10 +628,7 @@ std::map<ggml_type, uint32_t> ModelLoader::get_conditioner_wtype_stat() {
             continue;
         }
 
-        if ((tensor_storage.name.find("text_encoders") == std::string::npos &&
-             tensor_storage.name.find("cond_stage_model") == std::string::npos &&
-             tensor_storage.name.find("te.text_model.") == std::string::npos &&
-             tensor_storage.name.find("conditioner") == std::string::npos)) {
+        if (tensor_storage.name.find("text_encoders") == std::string::npos) {
             continue;
         }
 
@@ -652,7 +649,7 @@ std::map<ggml_type, uint32_t> ModelLoader::get_diffusion_model_wtype_stat() {
             continue;
         }
 
-        if (tensor_storage.name.find("model.diffusion_model.") == std::string::npos && tensor_storage.name.find("unet.") == std::string::npos) {
+        if (tensor_storage.name.find("model.diffusion_model.") == std::string::npos) {
             continue;
         }
 
@@ -673,8 +670,7 @@ std::map<ggml_type, uint32_t> ModelLoader::get_vae_wtype_stat() {
             continue;
         }
 
-        if (tensor_storage.name.find("vae.") == std::string::npos &&
-            tensor_storage.name.find("first_stage_model") == std::string::npos) {
+        if (tensor_storage.name.find("vae.") == std::string::npos) {
             continue;
         }
 

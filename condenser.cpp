@@ -11,7 +11,6 @@
 #include "diffusion_model.hpp"
 #include "vae.hpp"
 
-#include "latent-preview.h"
 #include "name_conversion.h"
 
 // ---------------------------------------------------------------------------

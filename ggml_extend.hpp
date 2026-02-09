@@ -127,91 +127,6 @@ __STATIC_INLINE__ ggml_fp16_t ggml_ext_tensor_get_f16(const ggml_tensor* tensor,
     return *(ggml_fp16_t*)((char*)(tensor->data) + i3 * tensor->nb[3] + i2 * tensor->nb[2] + i1 * tensor->nb[1] + i0 * tensor->nb[0]);
 }
 
-__STATIC_INLINE__ float sd_image_get_f32(sd_image_t image, int64_t iw, int64_t ih, int64_t ic, bool scale = true) {
-    float value = *(image.data + ih * image.width * image.channel + iw * image.channel + ic);
-    if (scale) {
-        value /= 255.f;
-    }
-    return value;
-}
-
-__STATIC_INLINE__ float sd_image_get_f32(sd_image_f32_t image, int64_t iw, int64_t ih, int64_t ic, bool scale = true) {
-    float value = *(image.data + ih * image.width * image.channel + iw * image.channel + ic);
-    if (scale) {
-        value /= 255.f;
-    }
-    return value;
-}
-
-__STATIC_INLINE__ void print_ggml_tensor(struct ggml_tensor* tensor, bool shape_only = false, const char* mark = "") {
-    printf("%s (%s): shape(%zu, %zu, %zu, %zu)\n", mark, ggml_type_name(tensor->type), tensor->ne[0], tensor->ne[1], tensor->ne[2], tensor->ne[3]);
-    fflush(stdout);
-    if (shape_only) {
-        return;
-    }
-    int range = 3;
-    for (int i3 = 0; i3 < tensor->ne[3]; i3++) {
-        if (i3 >= range && i3 + range < tensor->ne[3]) {
-            continue;
-        }
-        for (int i2 = 0; i2 < tensor->ne[2]; i2++) {
-            if (i2 >= range && i2 + range < tensor->ne[2]) {
-                continue;
-            }
-            for (int i1 = 0; i1 < tensor->ne[1]; i1++) {
-                if (i1 >= range && i1 + range < tensor->ne[1]) {
-                    continue;
-                }
-                for (int i0 = 0; i0 < tensor->ne[0]; i0++) {
-                    if (i0 >= range && i0 + range < tensor->ne[0]) {
-                        continue;
-                    }
-                    if (tensor->type == GGML_TYPE_F32) {
-                        printf("  [%d, %d, %d, %d] = %f\n", i3, i2, i1, i0, ggml_ext_tensor_get_f32(tensor, i0, i1, i2, i3));
-                    } else if (tensor->type == GGML_TYPE_F16) {
-                        printf("  [%d, %d, %d, %d] = %f\n", i3, i2, i1, i0, ggml_fp16_to_fp32(ggml_ext_tensor_get_f16(tensor, i0, i1, i2, i3)));
-                    } else if (tensor->type == GGML_TYPE_I32) {
-                        printf("  [%d, %d, %d, %d] = %i3\n", i3, i2, i1, i0, ggml_ext_tensor_get_i32(tensor, i0, i1, i2, i3));
-                    }
-                    fflush(stdout);
-                }
-            }
-        }
-    }
-}
-
-__STATIC_INLINE__ void ggml_ext_tensor_iter(
-    ggml_tensor* tensor,
-    const std::function<void(ggml_tensor*, int64_t, int64_t, int64_t, int64_t)>& fn) {
-    int64_t n0 = tensor->ne[0];
-    int64_t n1 = tensor->ne[1];
-    int64_t n2 = tensor->ne[2];
-    int64_t n3 = tensor->ne[3];
-
-    for (int64_t i3 = 0; i3 < n3; i3++) {
-        for (int64_t i2 = 0; i2 < n2; i2++) {
-            for (int64_t i1 = 0; i1 < n1; i1++) {
-                for (int64_t i0 = 0; i0 < n0; i0++) {
-                    fn(tensor, i0, i1, i2, i3);
-                }
-            }
-        }
-    }
-}
-
-__STATIC_INLINE__ void ggml_ext_tensor_iter(
-    ggml_tensor* tensor,
-    const std::function<void(ggml_tensor*, int64_t)>& fn) {
-    int64_t n0 = tensor->ne[0];
-    int64_t n1 = tensor->ne[1];
-    int64_t n2 = tensor->ne[2];
-    int64_t n3 = tensor->ne[3];
-
-    for (int64_t i = 0; i < ggml_nelements(tensor); i++) {
-        fn(tensor, i);
-    }
-}
-
 __STATIC_INLINE__ void copy_ggml_tensor(struct ggml_tensor* dst, struct ggml_tensor* src) {
     if (dst->type == src->type) {
         dst->nb[0] = src->nb[0];
@@ -239,10 +154,6 @@ __STATIC_INLINE__ void copy_ggml_tensor(struct ggml_tensor* dst, struct ggml_ten
     ggml_free(ctx);
 }
 
-__STATIC_INLINE__ float sigmoid(float x) {
-    return 1 / (1.0f + expf(-x));
-}
-
 // SPECIAL OPERATIONS WITH TENSORS
 
 __STATIC_INLINE__ uint8_t* ggml_tensor_to_sd_image(struct ggml_tensor* input, uint8_t* image_data = nullptr) {
@@ -258,33 +169,6 @@ __STATIC_INLINE__ uint8_t* ggml_tensor_to_sd_image(struct ggml_tensor* input, ui
             for (int k = 0; k < channels; k++) {
                 float value                                               = ggml_ext_tensor_get_f32(input, ix, iy, k);
                 *(image_data + iy * width * channels + ix * channels + k) = (uint8_t)(value * 255.0f);
-            }
-        }
-    }
-    return image_data;
-}
-
-__STATIC_INLINE__ uint8_t* ggml_tensor_to_sd_image(struct ggml_tensor* input, int idx, bool video = false) {
-    int64_t width  = input->ne[0];
-    int64_t height = input->ne[1];
-    int64_t channels;
-    if (video) {
-        channels = input->ne[3];
-    } else {
-        channels = input->ne[2];
-    }
-    GGML_ASSERT(channels == 3 && input->type == GGML_TYPE_F32);
-    uint8_t* image_data = (uint8_t*)malloc(width * height * channels);
-    for (int ih = 0; ih < height; ih++) {
-        for (int iw = 0; iw < width; iw++) {
-            for (int ic = 0; ic < channels; ic++) {
-                float value;
-                if (video) {
-                    value = ggml_ext_tensor_get_f32(input, iw, ih, idx, ic);
-                } else {
-                    value = ggml_ext_tensor_get_f32(input, iw, ih, ic, idx);
-                }
-                *(image_data + ih * width * channels + iw * channels + ic) = (uint8_t)(value * 255.0f);
             }
         }
     }
@@ -322,40 +206,6 @@ __STATIC_INLINE__ void sd_image_to_ggml_tensor(sd_image_t image,
             } else {
                 for (int64_t w = 0; w < W; w++) {
                     dst_row[w] = (float)src_row[w * C];
-                }
-            }
-        }
-    }
-}
-
-__STATIC_INLINE__ void sd_image_f32_to_ggml_tensor(sd_image_f32_t image,
-                                                   ggml_tensor* tensor,
-                                                   bool scale = true) {
-    GGML_ASSERT(image.width == tensor->ne[0]);
-    GGML_ASSERT(image.height == tensor->ne[1]);
-    GGML_ASSERT(image.channel == tensor->ne[2]);
-    GGML_ASSERT(1 == tensor->ne[3]);
-    GGML_ASSERT(tensor->type == GGML_TYPE_F32);
-
-    // Direct pointer arithmetic (mirrors sd_image_to_ggml_tensor optimization)
-    float* dst           = (float*)tensor->data;
-    const float* src     = image.data;
-    const float inv_255  = 1.0f / 255.0f;
-    const int64_t W      = (int64_t)image.width;
-    const int64_t H      = (int64_t)image.height;
-    const int64_t C      = (int64_t)image.channel;
-
-    for (int64_t c = 0; c < C; c++) {
-        for (int64_t h = 0; h < H; h++) {
-            const float* src_row = src + h * W * C + c;
-            float* dst_row       = dst + c * H * W + h * W;
-            if (scale) {
-                for (int64_t w = 0; w < W; w++) {
-                    dst_row[w] = src_row[w * C] * inv_255;
-                }
-            } else {
-                for (int64_t w = 0; w < W; w++) {
-                    dst_row[w] = src_row[w * C];
                 }
             }
         }
@@ -755,12 +605,6 @@ __STATIC_INLINE__ void sd_tiling(ggml_tensor* input,
     sd_tiling_non_square(input, output, scale, tile_size, tile_size, tile_overlap_factor, on_processing);
 }
 
-__STATIC_INLINE__ struct ggml_tensor* ggml_ext_group_norm_32(struct ggml_context* ctx,
-                                                             struct ggml_tensor* a) {
-    const float eps = 1e-6f;  // default eps parameter
-    return ggml_group_norm(ctx, a, 32, eps);
-}
-
 __STATIC_INLINE__ struct ggml_tensor* ggml_ext_scale(struct ggml_context* ctx,
                                                      struct ggml_tensor* x,
                                                      float factor,
@@ -772,20 +616,6 @@ __STATIC_INLINE__ struct ggml_tensor* ggml_ext_scale(struct ggml_context* ctx,
         x = ggml_scale_inplace(ctx, x, factor);
     } else {
         x = ggml_scale(ctx, x, factor);
-    }
-    return x;
-}
-
-__STATIC_INLINE__ struct ggml_tensor* ggml_ext_gelu(struct ggml_context* ctx,
-                                                    struct ggml_tensor* x,
-                                                    bool inplace = false) {
-    if (!ggml_is_contiguous(x)) {
-        x = ggml_cont(ctx, x);
-    }
-    if (inplace) {
-        x = ggml_gelu_inplace(ctx, x);
-    } else {
-        x = ggml_gelu(ctx, x);
     }
     return x;
 }
