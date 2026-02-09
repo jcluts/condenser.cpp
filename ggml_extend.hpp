@@ -197,6 +197,8 @@ __STATIC_INLINE__ void copy_ggml_tensor(struct ggml_tensor* dst, struct ggml_ten
 
 // SPECIAL OPERATIONS WITH TENSORS
 
+// V2-5: Direct pointer arithmetic — avoids ~3M per-element accessor calls for
+// 1024×1024×3 output. Mirrors the sd_image_to_ggml_tensor optimization (I2).
 __STATIC_INLINE__ uint8_t* ggml_tensor_to_sd_image(struct ggml_tensor* input, uint8_t* image_data = nullptr) {
     int64_t width    = input->ne[0];
     int64_t height   = input->ne[1];
@@ -205,11 +207,17 @@ __STATIC_INLINE__ uint8_t* ggml_tensor_to_sd_image(struct ggml_tensor* input, ui
     if (image_data == nullptr) {
         image_data = (uint8_t*)malloc(width * height * channels);
     }
-    for (int iy = 0; iy < height; iy++) {
-        for (int ix = 0; ix < width; ix++) {
-            for (int k = 0; k < channels; k++) {
-                float value                                               = ggml_ext_tensor_get_f32(input, ix, iy, k);
-                *(image_data + iy * width * channels + ix * channels + k) = (uint8_t)(value * 255.0f);
+
+    // Tensor layout: planar CHW — ne[0]=W innermost, then H, then C
+    // Output layout: interleaved HWC
+    const float* src = (const float*)input->data;
+    for (int64_t c = 0; c < channels; c++) {
+        const float* src_plane = src + c * height * width;
+        for (int64_t h = 0; h < height; h++) {
+            const float* src_row = src_plane + h * width;
+            uint8_t* dst_row = image_data + h * width * channels + c;
+            for (int64_t w = 0; w < width; w++) {
+                dst_row[w * channels] = (uint8_t)(src_row[w] * 255.0f);
             }
         }
     }

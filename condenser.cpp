@@ -1370,10 +1370,40 @@ sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
     return result_images;
 }
 
-sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_gen_params) {
-    sd_ctx->sd->vae_tiling_params = sd_img_gen_params->vae_tiling_params;
-    int width                     = sd_img_gen_params->width;
-    int height                    = sd_img_gen_params->height;
+// ---------------------------------------------------------------------------
+// V2-8: Shared generation preparation — eliminates code triplication across
+// generate_image, generate_image_with_condition, and
+// generate_image_with_condition_and_latents.
+// ---------------------------------------------------------------------------
+
+struct GenerationPrepared {
+    ggml_context*            work_ctx;
+    ggml_backend_buffer_t    pinned_buf;
+    ggml_tensor*             init_latent;
+    std::vector<sd_image_t*> ref_images;
+    std::vector<float>       sigmas;
+    sample_method_t          sample_method;
+    int                      width;
+    int                      height;
+    int64_t                  seed;
+    float                    distilled_guidance;
+    float                    eta;
+    size_t                   t0;  // timestamp at start of generation
+
+    GenerationPrepared()
+        : work_ctx(nullptr), pinned_buf(nullptr), init_latent(nullptr),
+          sample_method(EULER_SAMPLE_METHOD), width(0), height(0), seed(0),
+          distilled_guidance(1.0f), eta(0.0f), t0(0) {}
+};
+
+// Returns nullptr on failure. Caller owns the returned struct and its work_ctx/pinned_buf.
+static GenerationPrepared* prepare_generation(
+    sd_ctx_t* sd_ctx,
+    const sd_img_gen_params_t* params) {
+
+    sd_ctx->sd->vae_tiling_params = params->vae_tiling_params;
+    int width  = params->width;
+    int height = params->height;
 
     int vae_scale_factor            = sd_ctx->sd->get_vae_scale_factor();
     int diffusion_model_down_factor = sd_ctx->sd->get_diffusion_model_down_factor();
@@ -1384,18 +1414,13 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
     if (width_offset > 0 || height_offset > 0) {
         width += width_offset;
         height += height_offset;
-        LOG_WARN("align up %dx%d to %dx%d (multiple=%d)", sd_img_gen_params->width, sd_img_gen_params->height, width, height, spatial_multiple);
-    }
-
-    LOG_DEBUG("generate_image %dx%d", width, height);
-    if (sd_ctx == nullptr || sd_img_gen_params == nullptr) {
-        return nullptr;
+        LOG_WARN("align up %dx%d to %dx%d (multiple=%d)",
+                 params->width, params->height, width, height, spatial_multiple);
     }
 
     // I3: Right-size work context based on image dimensions and ref count
-    // instead of unconditionally allocating 1 GB
     struct ggml_context* work_ctx = nullptr;
-    ggml_backend_buffer_t pinned_buf = nullptr;  // V2-1: Vulkan pinned host buffer
+    ggml_backend_buffer_t pinned_buf = nullptr;
     {
         const int vae_sf   = sd_ctx->sd->get_vae_scale_factor();
         const int lat_ch   = sd_ctx->sd->get_latent_channel();
@@ -1405,19 +1430,17 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
         const size_t latent_bytes  = lat_w * lat_h * lat_ch * sizeof(float);
         const size_t decoded_bytes = (size_t)width * height * 3 * sizeof(float);
 
-        // Reference latents only (pixel tensors freed via I1 temp context)
         size_t ref_latent_bytes = 0;
-        for (int i = 0; i < sd_img_gen_params->ref_images_count; i++) {
-            size_t rlw = sd_img_gen_params->ref_images[i].width / vae_sf;
-            size_t rlh = sd_img_gen_params->ref_images[i].height / vae_sf;
+        for (int i = 0; i < params->ref_images_count; i++) {
+            size_t rlw = params->ref_images[i].width / vae_sf;
+            size_t rlh = params->ref_images[i].height / vae_sf;
             ref_latent_bytes += rlw * rlh * lat_ch * sizeof(float);
         }
 
-        // Budget: multiple latent copies + decoded image + refs + headroom
         size_t budget = latent_bytes * 8 + decoded_bytes + ref_latent_bytes
-                      + 128 * 1024 * 1024;  // 128 MB headroom for conditioning etc.
-        budget = std::max(budget, (size_t)(256 * 1024 * 1024));              // min 256 MB
-        budget = std::min(budget, (size_t)(1024) * (size_t)(1024 * 1024));   // cap 1 GB
+                      + 128 * 1024 * 1024;
+        budget = std::max(budget, (size_t)(256 * 1024 * 1024));
+        budget = std::min(budget, (size_t)(1024) * (size_t)(1024 * 1024));
 
         LOG_DEBUG("work_ctx budget: %.1f MB (latent=%.1f MB, decoded=%.1f MB, refs=%.1f MB)",
                   budget / (1024.0 * 1024.0), latent_bytes / (1024.0 * 1024.0),
@@ -1426,12 +1449,12 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
         // V2-1: Try Vulkan pinned host buffer for faster CPU↔GPU DMA transfers
         pinned_buf = sd_alloc_pinned_host_buffer(sd_ctx->sd->backend, budget);
 
-        struct ggml_init_params params;
-        params.mem_size   = budget;
-        params.mem_buffer = pinned_buf ? ggml_backend_buffer_get_base(pinned_buf) : nullptr;
-        params.no_alloc   = false;
+        struct ggml_init_params init_params;
+        init_params.mem_size   = budget;
+        init_params.mem_buffer = pinned_buf ? ggml_backend_buffer_get_base(pinned_buf) : nullptr;
+        init_params.no_alloc   = false;
 
-        work_ctx = ggml_init(params);
+        work_ctx = ggml_init(init_params);
         if (!work_ctx && pinned_buf) {
             ggml_backend_buffer_free(pinned_buf);
             pinned_buf = nullptr;
@@ -1442,7 +1465,8 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
         return nullptr;
     }
 
-    int64_t seed = sd_img_gen_params->seed;
+    // Seed RNG
+    int64_t seed = params->seed;
     if (seed < 0) {
         srand((int)time(nullptr));
         seed = rand();
@@ -1451,61 +1475,85 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
 
     size_t t0 = ggml_time_ms();
 
-
-    enum sample_method_t sample_method = sd_img_gen_params->sample_params.sample_method;
+    // Resolve sample method
+    enum sample_method_t sample_method = params->sample_params.sample_method;
     if (sample_method == SAMPLE_METHOD_COUNT) {
         sample_method = sd_get_default_sample_method(sd_ctx);
     }
     LOG_INFO("sampling using %s method", sampling_methods_str[sample_method]);
 
-    int sample_steps = sd_img_gen_params->sample_params.sample_steps;
+    // Handle Flux2 4-step override
+    int sample_steps = params->sample_params.sample_steps;
     if (sd_version_is_flux2(sd_ctx->sd->version) &&
-        sd_img_gen_params->sample_params.custom_sigmas_count == 0 &&
+        params->sample_params.custom_sigmas_count == 0 &&
         sample_steps == 20) {
         LOG_INFO("Flux2 distilled default steps detected; using 4 steps");
         sample_steps = 4;
     }
+
+    // Build sigmas
     std::vector<float> sigmas;
-    if (sd_img_gen_params->sample_params.custom_sigmas_count > 0) {
-        sigmas = std::vector<float>(sd_img_gen_params->sample_params.custom_sigmas,
-                                    sd_img_gen_params->sample_params.custom_sigmas + sd_img_gen_params->sample_params.custom_sigmas_count);
-        if (sample_steps != sigmas.size() - 1) {
+    if (params->sample_params.custom_sigmas_count > 0) {
+        sigmas = std::vector<float>(
+            params->sample_params.custom_sigmas,
+            params->sample_params.custom_sigmas +
+                params->sample_params.custom_sigmas_count);
+        if (sample_steps != (int)sigmas.size() - 1) {
             sample_steps = static_cast<int>(sigmas.size()) - 1;
             LOG_WARN("sample_steps != custom_sigmas_count - 1, set sample_steps to %d", sample_steps);
         }
     } else {
-        sigmas = sd_ctx->sd->denoiser->get_sigmas(sample_steps,
-                                                  sd_ctx->sd->get_image_seq_len(height, width),
-                                                  sd_ctx->sd->version);
+        sigmas = sd_ctx->sd->denoiser->get_sigmas(
+            sample_steps,
+            sd_ctx->sd->get_image_seq_len(height, width),
+            sd_ctx->sd->version);
     }
 
-    ggml_tensor* init_latent = nullptr;
- 
-    init_latent = sd_ctx->sd->generate_init_latent(work_ctx, width, height);
+    // Create init latent
+    ggml_tensor* init_latent = sd_ctx->sd->generate_init_latent(work_ctx, width, height);
 
-    // Flux2 uses embedded guidance (distilled) — extract and apply default if needed
-    float distilled_guidance = sd_img_gen_params->sample_params.guidance.distilled_guidance;
+    // Extract distilled guidance
+    float distilled_guidance = params->sample_params.guidance.distilled_guidance;
     if (distilled_guidance == 3.5f) {
         distilled_guidance = 1.0f;
     }
+
+    // Build ref_images vector
     std::vector<sd_image_t*> ref_images;
-    for (int i = 0; i < sd_img_gen_params->ref_images_count; i++) {
-        ref_images.push_back(&sd_img_gen_params->ref_images[i]);
+    for (int i = 0; i < params->ref_images_count; i++) {
+        ref_images.push_back(&params->ref_images[i]);
     }
-
-    std::vector<uint8_t> empty_image_data;
-
-    if (ref_images.size() > 0) {
+    if (!ref_images.empty()) {
         LOG_INFO("Image edit mode enabled.");
     }
 
-    // I1: Encode ref images using a temporary context for pixel tensors.
-    // The latent output is allocated in work_ctx; the pixel tensor (~12 MB per
-    // 1024x1024 ref) is freed immediately after encoding instead of persisting
-    // as dead weight throughout the entire denoising + VAE decode pipeline.
+    // Populate result
+    GenerationPrepared* prep = new GenerationPrepared();
+    prep->work_ctx           = work_ctx;
+    prep->pinned_buf         = pinned_buf;
+    prep->init_latent        = init_latent;
+    prep->ref_images         = std::move(ref_images);
+    prep->sigmas             = std::move(sigmas);
+    prep->sample_method      = sample_method;
+    prep->width              = width;
+    prep->height             = height;
+    prep->seed               = seed;
+    prep->distilled_guidance = distilled_guidance;
+    prep->eta                = params->sample_params.eta;
+    prep->t0                 = t0;
+    return prep;
+}
+
+// I1: Encode ref images using temporary contexts for pixel tensors.
+// The latent output is allocated in work_ctx; the pixel tensor (~12 MB per
+// 1024×1024 ref) is freed immediately after encoding.
+static std::vector<ggml_tensor*> encode_ref_images_to_latents(
+    sd_ctx_t* sd_ctx,
+    ggml_context* work_ctx,
+    const std::vector<sd_image_t*>& ref_images) {
+
     std::vector<ggml_tensor*> ref_latents;
-    for (size_t i = 0; i < ref_images.size(); i++) {
-        // Temporary context: pixel tensor + 4 MB headroom for ggml overhead
+    for (int i = 0; i < (int)ref_images.size(); i++) {
         size_t img_bytes = (size_t)ref_images[i]->width * ref_images[i]->height * 3 * sizeof(float);
         struct ggml_init_params enc_params;
         enc_params.mem_size   = img_bytes + 4 * 1024 * 1024;
@@ -1513,52 +1561,82 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
         enc_params.no_alloc   = false;
         struct ggml_context* enc_ctx = ggml_init(enc_params);
         if (!enc_ctx) {
-            LOG_ERROR("failed to allocate temp context for ref image %zu", i);
+            LOG_ERROR("failed to allocate temp context for ref image %d", i);
             continue;
         }
 
-        ggml_tensor* img = ggml_new_tensor_4d(enc_ctx,
-                                              GGML_TYPE_F32,
+        ggml_tensor* img = ggml_new_tensor_4d(enc_ctx, GGML_TYPE_F32,
                                               ref_images[i]->width,
-                                              ref_images[i]->height,
-                                              3, 1);
+                                              ref_images[i]->height, 3, 1);
         sd_image_to_ggml_tensor(*ref_images[i], img);
-
-        // Latent is allocated in work_ctx; img is only read during compute()
         ggml_tensor* latent = sd_ctx->sd->encode_first_stage(work_ctx, img);
         ref_latents.push_back(latent);
 
-        // Free pixel tensor immediately — saves ~12 MB per 1024x1024 ref
         ggml_free(enc_ctx);
     }
+    return ref_latents;
+}
 
-    if (sd_img_gen_params->ref_images_count > 0) {
-        size_t t1 = ggml_time_ms();
-        LOG_INFO("encode_first_stage completed, taking %.2fs", (t1 - t0) * 1.0f / 1000);
+// Encode a single ref image with temp context — used as fallback for deserialization failures
+static ggml_tensor* encode_single_ref_image(
+    sd_ctx_t* sd_ctx,
+    ggml_context* work_ctx,
+    const sd_image_t& image) {
+
+    size_t img_bytes = (size_t)image.width * image.height * 3 * sizeof(float);
+    struct ggml_init_params enc_params;
+    enc_params.mem_size   = img_bytes + 4 * 1024 * 1024;
+    enc_params.mem_buffer = nullptr;
+    enc_params.no_alloc   = false;
+    struct ggml_context* enc_ctx = ggml_init(enc_params);
+    if (!enc_ctx) {
+        return nullptr;
     }
 
-    sd_image_t* result_images = generate_image_internal(sd_ctx,
-                                                        work_ctx,
-                                                        init_latent,
-                                                        SAFE_STR(sd_img_gen_params->prompt),
-                                                        distilled_guidance,
-                                                        sd_img_gen_params->sample_params.eta,
-                                                        width,
-                                                        height,
-                                                        sample_method,
-                                                        sigmas,
-                                                        seed,
-                                                        ref_images,
-                                                        ref_latents,
-                                                        sd_img_gen_params->increase_ref_index);
+    ggml_tensor* img = ggml_new_tensor_4d(enc_ctx, GGML_TYPE_F32,
+                                          image.width, image.height, 3, 1);
+    sd_image_to_ggml_tensor(image, img);
+    ggml_tensor* latent = sd_ctx->sd->encode_first_stage(work_ctx, img);
+    ggml_free(enc_ctx);
+    return latent;
+}
 
-    // V2-1: Free pinned host buffer after work_ctx is freed by generate_image_internal
-    if (pinned_buf) ggml_backend_buffer_free(pinned_buf);
+// ---------------------------------------------------------------------------
+
+sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_gen_params) {
+    if (sd_ctx == nullptr || sd_img_gen_params == nullptr) {
+        return nullptr;
+    }
+
+    GenerationPrepared* prep = prepare_generation(sd_ctx, sd_img_gen_params);
+    if (!prep) return nullptr;
+
+    LOG_DEBUG("generate_image %dx%d", prep->width, prep->height);
+
+    // Encode ref images to latents
+    std::vector<ggml_tensor*> ref_latents =
+        encode_ref_images_to_latents(sd_ctx, prep->work_ctx, prep->ref_images);
+
+    if (!prep->ref_images.empty()) {
+        size_t t1 = ggml_time_ms();
+        LOG_INFO("encode_first_stage completed, taking %.2fs", (t1 - prep->t0) * 1.0f / 1000);
+    }
+
+    sd_image_t* result_images = generate_image_internal(
+        sd_ctx, prep->work_ctx, prep->init_latent,
+        SAFE_STR(sd_img_gen_params->prompt),
+        prep->distilled_guidance, prep->eta,
+        prep->width, prep->height,
+        prep->sample_method, prep->sigmas, prep->seed,
+        prep->ref_images, ref_latents,
+        sd_img_gen_params->increase_ref_index);
+
+    if (prep->pinned_buf) ggml_backend_buffer_free(prep->pinned_buf);
 
     size_t t2 = ggml_time_ms();
+    LOG_INFO("generate_image completed in %.2fs", (t2 - prep->t0) * 1.0f / 1000);
 
-    LOG_INFO("generate_image completed in %.2fs", (t2 - t0) * 1.0f / 1000);
-
+    delete prep;
     return result_images;
 }
 
@@ -1578,8 +1656,11 @@ sd_condition_t* sd_compute_condition(sd_ctx_t* ctx,
     }
 
     // Allocate a temporary work_ctx for the computation
+    // V2-3: Right-sized — text conditioning produces 3 × hidden_size × max_tokens
+    // (Qwen3 4B: 3584 × 512 × 3 layers = ~21 MB) plus masks/positions/overhead ≈ 30 MB
+    // 64 MB gives ~2× safety margin (was 512 MB — wasted ~448 MB)
+    size_t cond_budget = static_cast<size_t>(64) * 1024 * 1024;  // 64 MB
     // V2-1: Use Vulkan pinned host buffer for faster CPU↔GPU DMA transfers
-    size_t cond_budget = static_cast<size_t>(512) * 1024 * 1024;  // 512 MB
     ggml_backend_buffer_t pinned_buf = sd_alloc_pinned_host_buffer(ctx->sd->backend, cond_budget);
 
     struct ggml_init_params params;
@@ -1633,172 +1714,36 @@ sd_image_t* generate_image_with_condition(sd_ctx_t* sd_ctx,
         return nullptr;
     }
 
-    sd_ctx->sd->vae_tiling_params = sd_img_gen_params->vae_tiling_params;
-    int width                     = sd_img_gen_params->width;
-    int height                    = sd_img_gen_params->height;
+    GenerationPrepared* prep = prepare_generation(sd_ctx, sd_img_gen_params);
+    if (!prep) return nullptr;
 
-    int vae_scale_factor            = sd_ctx->sd->get_vae_scale_factor();
-    int diffusion_model_down_factor = sd_ctx->sd->get_diffusion_model_down_factor();
-    int spatial_multiple            = vae_scale_factor * diffusion_model_down_factor;
+    LOG_DEBUG("generate_image_with_condition %dx%d", prep->width, prep->height);
 
-    int width_offset  = align_up_offset(width, spatial_multiple);
-    int height_offset = align_up_offset(height, spatial_multiple);
-    if (width_offset > 0 || height_offset > 0) {
-        width += width_offset;
-        height += height_offset;
-        LOG_WARN("align up %dx%d to %dx%d (multiple=%d)",
-                 sd_img_gen_params->width, sd_img_gen_params->height,
-                 width, height, spatial_multiple);
-    }
+    // Encode ref images to latents
+    std::vector<ggml_tensor*> ref_latents =
+        encode_ref_images_to_latents(sd_ctx, prep->work_ctx, prep->ref_images);
 
-    LOG_DEBUG("generate_image_with_condition %dx%d", width, height);
-
-    // I3: Right-size work context
-    struct ggml_context* work_ctx = nullptr;
-    ggml_backend_buffer_t pinned_buf = nullptr;  // V2-1: Vulkan pinned host buffer
-    {
-        const int vae_sf   = sd_ctx->sd->get_vae_scale_factor();
-        const int lat_ch   = sd_ctx->sd->get_latent_channel();
-        const size_t lat_w = (size_t)(width / vae_sf);
-        const size_t lat_h = (size_t)(height / vae_sf);
-
-        const size_t latent_bytes  = lat_w * lat_h * lat_ch * sizeof(float);
-        const size_t decoded_bytes = (size_t)width * height * 3 * sizeof(float);
-
-        size_t ref_latent_bytes = 0;
-        for (int i = 0; i < sd_img_gen_params->ref_images_count; i++) {
-            size_t rlw = sd_img_gen_params->ref_images[i].width / vae_sf;
-            size_t rlh = sd_img_gen_params->ref_images[i].height / vae_sf;
-            ref_latent_bytes += rlw * rlh * lat_ch * sizeof(float);
-        }
-
-        size_t budget = latent_bytes * 8 + decoded_bytes + ref_latent_bytes
-                      + 128 * 1024 * 1024;
-        budget = std::max(budget, (size_t)(256 * 1024 * 1024));
-        budget = std::min(budget, (size_t)(1024) * (size_t)(1024 * 1024));
-
-        LOG_DEBUG("work_ctx budget: %.1f MB", budget / (1024.0 * 1024.0));
-
-        // V2-1: Try Vulkan pinned host buffer for faster CPU↔GPU DMA transfers
-        pinned_buf = sd_alloc_pinned_host_buffer(sd_ctx->sd->backend, budget);
-
-        struct ggml_init_params params;
-        params.mem_size   = budget;
-        params.mem_buffer = pinned_buf ? ggml_backend_buffer_get_base(pinned_buf) : nullptr;
-        params.no_alloc   = false;
-
-        work_ctx = ggml_init(params);
-        if (!work_ctx && pinned_buf) {
-            ggml_backend_buffer_free(pinned_buf);
-            pinned_buf = nullptr;
-        }
-    }
-    if (!work_ctx) {
-        LOG_ERROR("ggml_init() failed");
-        return nullptr;
-    }
-
-    int64_t seed = sd_img_gen_params->seed;
-    if (seed < 0) {
-        srand((int)time(nullptr));
-        seed = rand();
-    }
-    sd_ctx->sd->rng->manual_seed(seed);
-
-    size_t t0 = ggml_time_ms();
-
-    enum sample_method_t sample_method = sd_img_gen_params->sample_params.sample_method;
-    if (sample_method == SAMPLE_METHOD_COUNT) {
-        sample_method = sd_get_default_sample_method(sd_ctx);
-    }
-    LOG_INFO("sampling using %s method", sampling_methods_str[sample_method]);
-
-    int sample_steps = sd_img_gen_params->sample_params.sample_steps;
-    if (sd_version_is_flux2(sd_ctx->sd->version) &&
-        sd_img_gen_params->sample_params.custom_sigmas_count == 0 &&
-        sample_steps == 20) {
-        LOG_INFO("Flux2 distilled default steps detected; using 4 steps");
-        sample_steps = 4;
-    }
-    std::vector<float> sigmas;
-    if (sd_img_gen_params->sample_params.custom_sigmas_count > 0) {
-        sigmas = std::vector<float>(
-            sd_img_gen_params->sample_params.custom_sigmas,
-            sd_img_gen_params->sample_params.custom_sigmas +
-                sd_img_gen_params->sample_params.custom_sigmas_count);
-        if (sample_steps != sigmas.size() - 1) {
-            sample_steps = static_cast<int>(sigmas.size()) - 1;
-            LOG_WARN("sample_steps != custom_sigmas_count - 1, set sample_steps to %d", sample_steps);
-        }
-    } else {
-        sigmas = sd_ctx->sd->denoiser->get_sigmas(
-            sample_steps,
-            sd_ctx->sd->get_image_seq_len(height, width),
-            sd_ctx->sd->version);
-    }
-
-    ggml_tensor* init_latent = nullptr;
-    LOG_INFO("TXT2IMG (with pre-computed condition)");
-    init_latent = sd_ctx->sd->generate_init_latent(work_ctx, width, height);
-
-    float distilled_guidance = sd_img_gen_params->sample_params.guidance.distilled_guidance;
-    if (distilled_guidance == 3.5f) {
-        distilled_guidance = 1.0f;
-    }
-
-    // Encode reference images to latents
-    std::vector<sd_image_t*> ref_images;
-    for (int i = 0; i < sd_img_gen_params->ref_images_count; i++) {
-        ref_images.push_back(&sd_img_gen_params->ref_images[i]);
-    }
-
-    // I1: Use temp context for pixel tensors — freed immediately after encoding
-    std::vector<ggml_tensor*> ref_latents;
-    for (int i = 0; i < (int)ref_images.size(); i++) {
-        size_t img_bytes = (size_t)ref_images[i]->width * ref_images[i]->height * 3 * sizeof(float);
-        struct ggml_init_params enc_params;
-        enc_params.mem_size   = img_bytes + 4 * 1024 * 1024;
-        enc_params.mem_buffer = nullptr;
-        enc_params.no_alloc   = false;
-        struct ggml_context* enc_ctx = ggml_init(enc_params);
-        if (!enc_ctx) {
-            LOG_ERROR("failed to allocate temp context for ref image %d", i);
-            continue;
-        }
-
-        ggml_tensor* img = ggml_new_tensor_4d(enc_ctx, GGML_TYPE_F32,
-                                              ref_images[i]->width, ref_images[i]->height,
-                                              3, 1);
-        sd_image_to_ggml_tensor(*ref_images[i], img);
-        ggml_tensor* latent = sd_ctx->sd->encode_first_stage(work_ctx, img);
-        ref_latents.push_back(latent);
-
-        ggml_free(enc_ctx);
-    }
-
-    if (sd_img_gen_params->ref_images_count > 0) {
+    if (!prep->ref_images.empty()) {
         size_t t1 = ggml_time_ms();
-        LOG_INFO("encode_first_stage completed, taking %.2fs", (t1 - t0) * 1.0f / 1000);
+        LOG_INFO("encode_first_stage completed, taking %.2fs", (t1 - prep->t0) * 1.0f / 1000);
     }
 
-    // Generate with pre-computed condition
     sd_image_t* result_images = generate_image_internal(
-        sd_ctx, work_ctx, init_latent,
+        sd_ctx, prep->work_ctx, prep->init_latent,
         SAFE_STR(sd_img_gen_params->prompt),
-        distilled_guidance,
-        sd_img_gen_params->sample_params.eta,
-        width, height,
-        sample_method, sigmas, seed,
-        ref_images, ref_latents,
+        prep->distilled_guidance, prep->eta,
+        prep->width, prep->height,
+        prep->sample_method, prep->sigmas, prep->seed,
+        prep->ref_images, ref_latents,
         sd_img_gen_params->increase_ref_index,
-        condition);  // pass pre-computed condition
+        condition);
 
-    // V2-1: Free pinned host buffer after work_ctx is freed by generate_image_internal
-    if (pinned_buf) ggml_backend_buffer_free(pinned_buf);
+    if (prep->pinned_buf) ggml_backend_buffer_free(prep->pinned_buf);
 
     size_t t2 = ggml_time_ms();
-    LOG_INFO("generate_image_with_condition completed in %.2fs", (t2 - t0) * 1.0f / 1000);
+    LOG_INFO("generate_image_with_condition completed in %.2fs", (t2 - prep->t0) * 1.0f / 1000);
 
+    delete prep;
     return result_images;
 }
 
@@ -1816,8 +1761,13 @@ sd_latent_t* sd_encode_ref_image(sd_ctx_t* ctx, const sd_image_t* image) {
         return nullptr;
     }
 
+    // V2-4: Right-sized — input W×H×3×float + output (W/16)×(H/16)×128×float + overhead
+    // (was 256 MB — wasted ~220 MB for a typical 1024×1024 image)
+    size_t input_bytes   = (size_t)image->width * image->height * 3 * sizeof(float);
+    size_t output_bytes  = (size_t)(image->width / 16) * (image->height / 16) * 128 * sizeof(float);
+    size_t encode_budget = input_bytes + output_bytes + 16 * 1024 * 1024;  // + 16 MB overhead
+    encode_budget = std::max(encode_budget, (size_t)(32 * 1024 * 1024));   // floor at 32 MB
     // V2-1: Use Vulkan pinned host buffer for faster CPU↔GPU DMA transfers
-    size_t encode_budget = static_cast<size_t>(256) * 1024 * 1024;  // 256 MB
     ggml_backend_buffer_t pinned_buf = sd_alloc_pinned_host_buffer(ctx->sd->backend, encode_budget);
 
     struct ggml_init_params params;
@@ -1873,153 +1823,26 @@ sd_image_t* generate_image_with_condition_and_latents(
         return nullptr;
     }
 
-    sd_ctx->sd->vae_tiling_params = sd_img_gen_params->vae_tiling_params;
-    int width                     = sd_img_gen_params->width;
-    int height                    = sd_img_gen_params->height;
+    GenerationPrepared* prep = prepare_generation(sd_ctx, sd_img_gen_params);
+    if (!prep) return nullptr;
 
-    int vae_scale_factor            = sd_ctx->sd->get_vae_scale_factor();
-    int diffusion_model_down_factor = sd_ctx->sd->get_diffusion_model_down_factor();
-    int spatial_multiple            = vae_scale_factor * diffusion_model_down_factor;
+    LOG_DEBUG("generate_image_with_condition_and_latents %dx%d", prep->width, prep->height);
 
-    int width_offset  = align_up_offset(width, spatial_multiple);
-    int height_offset = align_up_offset(height, spatial_multiple);
-    if (width_offset > 0 || height_offset > 0) {
-        width += width_offset;
-        height += height_offset;
-        LOG_WARN("align up %dx%d to %dx%d (multiple=%d)",
-                 sd_img_gen_params->width, sd_img_gen_params->height,
-                 width, height, spatial_multiple);
-    }
-
-    LOG_DEBUG("generate_image_with_condition_and_latents %dx%d", width, height);
-
-    // I3: Right-size work context
-    struct ggml_context* work_ctx = nullptr;
-    ggml_backend_buffer_t pinned_buf = nullptr;  // V2-1: Vulkan pinned host buffer
-    {
-        const int vae_sf   = sd_ctx->sd->get_vae_scale_factor();
-        const int lat_ch   = sd_ctx->sd->get_latent_channel();
-        const size_t lat_w = (size_t)(width / vae_sf);
-        const size_t lat_h = (size_t)(height / vae_sf);
-
-        const size_t latent_bytes  = lat_w * lat_h * lat_ch * sizeof(float);
-        const size_t decoded_bytes = (size_t)width * height * 3 * sizeof(float);
-
-        size_t ref_latent_bytes = 0;
-        for (int i = 0; i < sd_img_gen_params->ref_images_count; i++) {
-            size_t rlw = sd_img_gen_params->ref_images[i].width / vae_sf;
-            size_t rlh = sd_img_gen_params->ref_images[i].height / vae_sf;
-            ref_latent_bytes += rlw * rlh * lat_ch * sizeof(float);
-        }
-
-        size_t budget = latent_bytes * 8 + decoded_bytes + ref_latent_bytes
-                      + 128 * 1024 * 1024;
-        budget = std::max(budget, (size_t)(256 * 1024 * 1024));
-        budget = std::min(budget, (size_t)(1024) * (size_t)(1024 * 1024));
-
-        LOG_DEBUG("work_ctx budget: %.1f MB", budget / (1024.0 * 1024.0));
-
-        // V2-1: Try Vulkan pinned host buffer for faster CPU↔GPU DMA transfers
-        pinned_buf = sd_alloc_pinned_host_buffer(sd_ctx->sd->backend, budget);
-
-        struct ggml_init_params params;
-        params.mem_size   = budget;
-        params.mem_buffer = pinned_buf ? ggml_backend_buffer_get_base(pinned_buf) : nullptr;
-        params.no_alloc   = false;
-
-        work_ctx = ggml_init(params);
-        if (!work_ctx && pinned_buf) {
-            ggml_backend_buffer_free(pinned_buf);
-            pinned_buf = nullptr;
-        }
-    }
-    if (!work_ctx) {
-        LOG_ERROR("ggml_init() failed");
-        return nullptr;
-    }
-
-    int64_t seed = sd_img_gen_params->seed;
-    if (seed < 0) {
-        srand((int)time(nullptr));
-        seed = rand();
-    }
-    sd_ctx->sd->rng->manual_seed(seed);
-
-    size_t t0 = ggml_time_ms();
-
-    enum sample_method_t sample_method = sd_img_gen_params->sample_params.sample_method;
-    if (sample_method == SAMPLE_METHOD_COUNT) {
-        sample_method = sd_get_default_sample_method(sd_ctx);
-    }
-    LOG_INFO("sampling using %s method", sampling_methods_str[sample_method]);
-
-    int sample_steps = sd_img_gen_params->sample_params.sample_steps;
-    if (sd_version_is_flux2(sd_ctx->sd->version) &&
-        sd_img_gen_params->sample_params.custom_sigmas_count == 0 &&
-        sample_steps == 20) {
-        LOG_INFO("Flux2 distilled default steps detected; using 4 steps");
-        sample_steps = 4;
-    }
-    std::vector<float> sigmas;
-    if (sd_img_gen_params->sample_params.custom_sigmas_count > 0) {
-        sigmas = std::vector<float>(
-            sd_img_gen_params->sample_params.custom_sigmas,
-            sd_img_gen_params->sample_params.custom_sigmas +
-                sd_img_gen_params->sample_params.custom_sigmas_count);
-        if (sample_steps != (int)sigmas.size() - 1) {
-            sample_steps = static_cast<int>(sigmas.size()) - 1;
-            LOG_WARN("sample_steps != custom_sigmas_count - 1, set sample_steps to %d", sample_steps);
-        }
-    } else {
-        sigmas = sd_ctx->sd->denoiser->get_sigmas(
-            sample_steps,
-            sd_ctx->sd->get_image_seq_len(height, width),
-            sd_ctx->sd->version);
-    }
-
-    ggml_tensor* init_latent = nullptr;
-    LOG_INFO("TXT2IMG (with pre-computed condition + cached latents)");
-    init_latent = sd_ctx->sd->generate_init_latent(work_ctx, width, height);
-
-    float distilled_guidance = sd_img_gen_params->sample_params.guidance.distilled_guidance;
-    if (distilled_guidance == 3.5f) {
-        distilled_guidance = 1.0f;
-    }
-
-    // Build ref_images vector (needed for conditioning if condition is NULL)
-    std::vector<sd_image_t*> ref_images;
-    for (int i = 0; i < sd_img_gen_params->ref_images_count; i++) {
-        ref_images.push_back(&sd_img_gen_params->ref_images[i]);
-    }
-
-    // Deserialize pre-encoded reference latents
+    // Resolve reference latents: deserialize from cache, or encode from images
     std::vector<ggml_tensor*> ref_latents;
     if (ref_latents_cached && ref_latents_count > 0) {
         LOG_INFO("using %d pre-encoded reference latent(s) (latent cache hit)", ref_latents_count);
         for (int i = 0; i < ref_latents_count; i++) {
-            ggml_tensor* lat = deserialize_latent(work_ctx, ref_latents_cached[i]);
+            ggml_tensor* lat = deserialize_latent(prep->work_ctx, ref_latents_cached[i]);
             if (lat) {
                 ref_latents.push_back(lat);
             } else {
                 LOG_WARN("failed to deserialize cached latent %d, falling back to encode", i);
-                // I1: Fall back with temp context for pixel tensor
                 if (i < sd_img_gen_params->ref_images_count) {
-                    size_t img_bytes = (size_t)sd_img_gen_params->ref_images[i].width
-                                     * sd_img_gen_params->ref_images[i].height * 3 * sizeof(float);
-                    struct ggml_init_params enc_params;
-                    enc_params.mem_size   = img_bytes + 4 * 1024 * 1024;
-                    enc_params.mem_buffer = nullptr;
-                    enc_params.no_alloc   = false;
-                    struct ggml_context* enc_ctx = ggml_init(enc_params);
-                    if (enc_ctx) {
-                        ggml_tensor* img = ggml_new_tensor_4d(enc_ctx, GGML_TYPE_F32,
-                                                              sd_img_gen_params->ref_images[i].width,
-                                                              sd_img_gen_params->ref_images[i].height,
-                                                              3, 1);
-                        sd_image_to_ggml_tensor(sd_img_gen_params->ref_images[i], img);
-                        ggml_tensor* latent = sd_ctx->sd->encode_first_stage(work_ctx, img);
-                        ref_latents.push_back(latent);
-                        ggml_free(enc_ctx);
+                    ggml_tensor* fallback = encode_single_ref_image(
+                        sd_ctx, prep->work_ctx, sd_img_gen_params->ref_images[i]);
+                    if (fallback) {
+                        ref_latents.push_back(fallback);
                     } else {
                         LOG_ERROR("failed to allocate temp context for fallback ref image %d", i);
                     }
@@ -2027,52 +1850,31 @@ sd_image_t* generate_image_with_condition_and_latents(
             }
         }
     } else {
-        // No cached latents — encode reference images with temp contexts (I1)
-        for (int i = 0; i < (int)ref_images.size(); i++) {
-            size_t img_bytes = (size_t)ref_images[i]->width * ref_images[i]->height * 3 * sizeof(float);
-            struct ggml_init_params enc_params;
-            enc_params.mem_size   = img_bytes + 4 * 1024 * 1024;
-            enc_params.mem_buffer = nullptr;
-            enc_params.no_alloc   = false;
-            struct ggml_context* enc_ctx = ggml_init(enc_params);
-            if (!enc_ctx) {
-                LOG_ERROR("failed to allocate temp context for ref image %d", i);
-                continue;
-            }
-
-            ggml_tensor* img = ggml_new_tensor_4d(enc_ctx, GGML_TYPE_F32,
-                                                  ref_images[i]->width, ref_images[i]->height,
-                                                  3, 1);
-            sd_image_to_ggml_tensor(*ref_images[i], img);
-            ggml_tensor* latent = sd_ctx->sd->encode_first_stage(work_ctx, img);
-            ref_latents.push_back(latent);
-
-            ggml_free(enc_ctx);
-        }
-        if (sd_img_gen_params->ref_images_count > 0) {
+        // No cached latents — encode reference images
+        ref_latents = encode_ref_images_to_latents(sd_ctx, prep->work_ctx, prep->ref_images);
+        if (!prep->ref_images.empty()) {
             size_t t1 = ggml_time_ms();
-            LOG_INFO("encode_first_stage completed, taking %.2fs", (t1 - t0) * 1.0f / 1000);
+            LOG_INFO("encode_first_stage completed, taking %.2fs", (t1 - prep->t0) * 1.0f / 1000);
         }
     }
 
-    // Generate with pre-computed condition (and possibly cached latents)
     sd_image_t* result_images = generate_image_internal(
-        sd_ctx, work_ctx, init_latent,
+        sd_ctx, prep->work_ctx, prep->init_latent,
         SAFE_STR(sd_img_gen_params->prompt),
-        distilled_guidance,
-        sd_img_gen_params->sample_params.eta,
-        width, height,
-        sample_method, sigmas, seed,
-        ref_images, ref_latents,
+        prep->distilled_guidance, prep->eta,
+        prep->width, prep->height,
+        prep->sample_method, prep->sigmas, prep->seed,
+        prep->ref_images, ref_latents,
         sd_img_gen_params->increase_ref_index,
-        condition);  // may be NULL
+        condition);
 
-    // V2-1: Free pinned host buffer after work_ctx is freed by generate_image_internal
-    if (pinned_buf) ggml_backend_buffer_free(pinned_buf);
+    if (prep->pinned_buf) ggml_backend_buffer_free(prep->pinned_buf);
 
     size_t t2 = ggml_time_ms();
-    LOG_INFO("generate_image_with_condition_and_latents completed in %.2fs", (t2 - t0) * 1.0f / 1000);
+    LOG_INFO("generate_image_with_condition_and_latents completed in %.2fs",
+             (t2 - prep->t0) * 1.0f / 1000);
 
+    delete prep;
     return result_images;
 }
 
