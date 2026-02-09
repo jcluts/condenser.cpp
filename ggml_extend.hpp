@@ -61,6 +61,47 @@
 #define SD_UNUSED(x) (void)(x)
 #endif
 
+// ---------------------------------------------------------------------------
+// Vulkan pinned host buffer helpers
+//
+// When the runtime backend is Vulkan, allocating work context memory from a
+// Vulkan host buffer ensures that CPU→GPU data transfers (via
+// ggml_backend_tensor_set) bypass the staging buffer and use direct DMA.
+// The ggml-vulkan backend detects source pointers in registered pinned
+// memory ranges and emits vkCmdCopyBuffer directly from the host buffer.
+//
+// Usage:
+//   ggml_backend_buffer_t pinned = sd_alloc_pinned_host_buffer(backend, size);
+//   params.mem_buffer = pinned ? ggml_backend_buffer_get_base(pinned) : nullptr;
+//   ctx = ggml_init(params);
+//   ...
+//   ggml_free(ctx);                          // does NOT free mem_buffer
+//   if (pinned) ggml_backend_buffer_free(pinned);  // frees pinned memory
+// ---------------------------------------------------------------------------
+
+// Try to allocate a Vulkan pinned host buffer of the given size.
+// Returns nullptr when not on Vulkan, or if the allocation fails (caller
+// should fall back to normal malloc via ggml_init with mem_buffer=nullptr).
+__STATIC_INLINE__ ggml_backend_buffer_t sd_alloc_pinned_host_buffer(
+        ggml_backend_t backend, size_t size) {
+#ifdef SD_USE_VULKAN
+    if (backend != nullptr && !ggml_backend_is_cpu(backend)) {
+        ggml_backend_buffer_type_t host_buft = ggml_backend_vk_host_buffer_type();
+        if (host_buft) {
+            ggml_backend_buffer_t buf = ggml_backend_buft_alloc_buffer(host_buft, size);
+            if (buf) {
+                LOG_DEBUG("pinned host buffer: %.1f MB allocated for DMA transfers",
+                          size / (1024.0 * 1024.0));
+                return buf;
+            }
+        }
+    }
+#endif
+    SD_UNUSED(backend);
+    SD_UNUSED(size);
+    return nullptr;
+}
+
 __STATIC_INLINE__ int align_up_offset(int n, int multiple) {
     return (multiple - n % multiple) % multiple;
 }

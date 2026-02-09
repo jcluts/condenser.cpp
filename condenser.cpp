@@ -1395,6 +1395,7 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
     // I3: Right-size work context based on image dimensions and ref count
     // instead of unconditionally allocating 1 GB
     struct ggml_context* work_ctx = nullptr;
+    ggml_backend_buffer_t pinned_buf = nullptr;  // V2-1: Vulkan pinned host buffer
     {
         const int vae_sf   = sd_ctx->sd->get_vae_scale_factor();
         const int lat_ch   = sd_ctx->sd->get_latent_channel();
@@ -1422,12 +1423,19 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
                   budget / (1024.0 * 1024.0), latent_bytes / (1024.0 * 1024.0),
                   decoded_bytes / (1024.0 * 1024.0), ref_latent_bytes / (1024.0 * 1024.0));
 
+        // V2-1: Try Vulkan pinned host buffer for faster CPU↔GPU DMA transfers
+        pinned_buf = sd_alloc_pinned_host_buffer(sd_ctx->sd->backend, budget);
+
         struct ggml_init_params params;
         params.mem_size   = budget;
-        params.mem_buffer = nullptr;
+        params.mem_buffer = pinned_buf ? ggml_backend_buffer_get_base(pinned_buf) : nullptr;
         params.no_alloc   = false;
 
         work_ctx = ggml_init(params);
+        if (!work_ctx && pinned_buf) {
+            ggml_backend_buffer_free(pinned_buf);
+            pinned_buf = nullptr;
+        }
     }
     if (!work_ctx) {
         LOG_ERROR("ggml_init() failed");
@@ -1544,6 +1552,9 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
                                                         ref_latents,
                                                         sd_img_gen_params->increase_ref_index);
 
+    // V2-1: Free pinned host buffer after work_ctx is freed by generate_image_internal
+    if (pinned_buf) ggml_backend_buffer_free(pinned_buf);
+
     size_t t2 = ggml_time_ms();
 
     LOG_INFO("generate_image completed in %.2fs", (t2 - t0) * 1.0f / 1000);
@@ -1567,13 +1578,18 @@ sd_condition_t* sd_compute_condition(sd_ctx_t* ctx,
     }
 
     // Allocate a temporary work_ctx for the computation
+    // V2-1: Use Vulkan pinned host buffer for faster CPU↔GPU DMA transfers
+    size_t cond_budget = static_cast<size_t>(512) * 1024 * 1024;  // 512 MB
+    ggml_backend_buffer_t pinned_buf = sd_alloc_pinned_host_buffer(ctx->sd->backend, cond_budget);
+
     struct ggml_init_params params;
-    params.mem_size   = static_cast<size_t>(512) * 1024 * 1024;  // 512 MB
-    params.mem_buffer = nullptr;
+    params.mem_size   = cond_budget;
+    params.mem_buffer = pinned_buf ? ggml_backend_buffer_get_base(pinned_buf) : nullptr;
     params.no_alloc   = false;
 
     struct ggml_context* work_ctx = ggml_init(params);
     if (!work_ctx) {
+        if (pinned_buf) ggml_backend_buffer_free(pinned_buf);
         LOG_ERROR("sd_compute_condition: ggml_init() failed");
         return nullptr;
     }
@@ -1604,6 +1620,7 @@ sd_condition_t* sd_compute_condition(sd_ctx_t* ctx,
 
     // Free work_ctx — the serialized data is self-contained
     ggml_free(work_ctx);
+    if (pinned_buf) ggml_backend_buffer_free(pinned_buf);  // V2-1
 
     return result;
 }
@@ -1638,6 +1655,7 @@ sd_image_t* generate_image_with_condition(sd_ctx_t* sd_ctx,
 
     // I3: Right-size work context
     struct ggml_context* work_ctx = nullptr;
+    ggml_backend_buffer_t pinned_buf = nullptr;  // V2-1: Vulkan pinned host buffer
     {
         const int vae_sf   = sd_ctx->sd->get_vae_scale_factor();
         const int lat_ch   = sd_ctx->sd->get_latent_channel();
@@ -1661,12 +1679,19 @@ sd_image_t* generate_image_with_condition(sd_ctx_t* sd_ctx,
 
         LOG_DEBUG("work_ctx budget: %.1f MB", budget / (1024.0 * 1024.0));
 
+        // V2-1: Try Vulkan pinned host buffer for faster CPU↔GPU DMA transfers
+        pinned_buf = sd_alloc_pinned_host_buffer(sd_ctx->sd->backend, budget);
+
         struct ggml_init_params params;
         params.mem_size   = budget;
-        params.mem_buffer = nullptr;
+        params.mem_buffer = pinned_buf ? ggml_backend_buffer_get_base(pinned_buf) : nullptr;
         params.no_alloc   = false;
 
         work_ctx = ggml_init(params);
+        if (!work_ctx && pinned_buf) {
+            ggml_backend_buffer_free(pinned_buf);
+            pinned_buf = nullptr;
+        }
     }
     if (!work_ctx) {
         LOG_ERROR("ggml_init() failed");
@@ -1768,6 +1793,9 @@ sd_image_t* generate_image_with_condition(sd_ctx_t* sd_ctx,
         sd_img_gen_params->increase_ref_index,
         condition);  // pass pre-computed condition
 
+    // V2-1: Free pinned host buffer after work_ctx is freed by generate_image_internal
+    if (pinned_buf) ggml_backend_buffer_free(pinned_buf);
+
     size_t t2 = ggml_time_ms();
     LOG_INFO("generate_image_with_condition completed in %.2fs", (t2 - t0) * 1.0f / 1000);
 
@@ -1788,13 +1816,18 @@ sd_latent_t* sd_encode_ref_image(sd_ctx_t* ctx, const sd_image_t* image) {
         return nullptr;
     }
 
+    // V2-1: Use Vulkan pinned host buffer for faster CPU↔GPU DMA transfers
+    size_t encode_budget = static_cast<size_t>(256) * 1024 * 1024;  // 256 MB
+    ggml_backend_buffer_t pinned_buf = sd_alloc_pinned_host_buffer(ctx->sd->backend, encode_budget);
+
     struct ggml_init_params params;
-    params.mem_size   = static_cast<size_t>(256) * 1024 * 1024;  // 256 MB
-    params.mem_buffer = nullptr;
+    params.mem_size   = encode_budget;
+    params.mem_buffer = pinned_buf ? ggml_backend_buffer_get_base(pinned_buf) : nullptr;
     params.no_alloc   = false;
 
     struct ggml_context* work_ctx = ggml_init(params);
     if (!work_ctx) {
+        if (pinned_buf) ggml_backend_buffer_free(pinned_buf);
         LOG_ERROR("sd_encode_ref_image: ggml_init() failed");
         return nullptr;
     }
@@ -1812,6 +1845,7 @@ sd_latent_t* sd_encode_ref_image(sd_ctx_t* ctx, const sd_image_t* image) {
     if (!latent) {
         LOG_ERROR("sd_encode_ref_image: encode_first_stage returned null");
         ggml_free(work_ctx);
+        if (pinned_buf) ggml_backend_buffer_free(pinned_buf);  // V2-1
         return nullptr;
     }
 
@@ -1823,6 +1857,7 @@ sd_latent_t* sd_encode_ref_image(sd_ctx_t* ctx, const sd_image_t* image) {
     sd_latent_t* result = serialize_latent(latent);
 
     ggml_free(work_ctx);
+    if (pinned_buf) ggml_backend_buffer_free(pinned_buf);  // V2-1
     return result;
 }
 
@@ -1860,6 +1895,7 @@ sd_image_t* generate_image_with_condition_and_latents(
 
     // I3: Right-size work context
     struct ggml_context* work_ctx = nullptr;
+    ggml_backend_buffer_t pinned_buf = nullptr;  // V2-1: Vulkan pinned host buffer
     {
         const int vae_sf   = sd_ctx->sd->get_vae_scale_factor();
         const int lat_ch   = sd_ctx->sd->get_latent_channel();
@@ -1883,12 +1919,19 @@ sd_image_t* generate_image_with_condition_and_latents(
 
         LOG_DEBUG("work_ctx budget: %.1f MB", budget / (1024.0 * 1024.0));
 
+        // V2-1: Try Vulkan pinned host buffer for faster CPU↔GPU DMA transfers
+        pinned_buf = sd_alloc_pinned_host_buffer(sd_ctx->sd->backend, budget);
+
         struct ggml_init_params params;
         params.mem_size   = budget;
-        params.mem_buffer = nullptr;
+        params.mem_buffer = pinned_buf ? ggml_backend_buffer_get_base(pinned_buf) : nullptr;
         params.no_alloc   = false;
 
         work_ctx = ggml_init(params);
+        if (!work_ctx && pinned_buf) {
+            ggml_backend_buffer_free(pinned_buf);
+            pinned_buf = nullptr;
+        }
     }
     if (!work_ctx) {
         LOG_ERROR("ggml_init() failed");
@@ -2023,6 +2066,9 @@ sd_image_t* generate_image_with_condition_and_latents(
         ref_images, ref_latents,
         sd_img_gen_params->increase_ref_index,
         condition);  // may be NULL
+
+    // V2-1: Free pinned host buffer after work_ctx is freed by generate_image_internal
+    if (pinned_buf) ggml_backend_buffer_free(pinned_buf);
 
     size_t t2 = ggml_time_ms();
     LOG_INFO("generate_image_with_condition_and_latents completed in %.2fs", (t2 - t0) * 1.0f / 1000);
