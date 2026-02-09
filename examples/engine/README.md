@@ -104,7 +104,6 @@ Generates images using the currently loaded model. Fails if no model is loaded.
     "steps": 4,
     "sampling_method": "euler",
     "guidance": 3.5,
-    "batch_count": 1,
     "output": "/path/to/output.png",
     "ref_images": ["/path/to/ref1.png"],
     "increase_ref_index": false,

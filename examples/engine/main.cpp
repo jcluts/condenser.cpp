@@ -396,7 +396,6 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
     int width          = p.value("width", 512);
     int height         = p.value("height", 512);
     int64_t seed       = p.value("seed", (int64_t)42);
-    int batch_count    = p.value("batch_count", 1);
 
     // Prompt conditioning cache control (default: enabled)
     bool use_prompt_cache = p.value("use_prompt_cache", true);
@@ -644,7 +643,6 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
     img_gen_params.height            = height;
     img_gen_params.sample_params     = sample_params;
     img_gen_params.seed              = seed;
-    img_gen_params.batch_count       = batch_count;
     img_gen_params.vae_tiling_params = vae_tiling;
 
     // --- Run generation ---
@@ -684,50 +682,38 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
 
     // Save results
     int saved_count = 0;
-    fs::path base_path = fs::path(output);
-    fs::path ext       = base_path.has_extension() ? base_path.extension() : fs::path(".png");
-    fs::path stem      = base_path;
-    if (stem.has_extension()) stem.replace_extension();
-
-    std::string ext_lower = ext.string();
-    std::transform(ext_lower.begin(), ext_lower.end(), ext_lower.begin(), ::tolower);
+    std::string ext_lower;
+    {
+        fs::path ext = fs::path(output).has_extension() ? fs::path(output).extension() : fs::path(".png");
+        ext_lower = ext.string();
+        std::transform(ext_lower.begin(), ext_lower.end(), ext_lower.begin(), ::tolower);
+    }
     bool is_jpg = (ext_lower == ".jpg" || ext_lower == ".jpeg");
 
-    std::vector<std::string> output_paths;
+    std::string output_path = output;
 
-    for (int i = 0; i < batch_count; i++) {
-        if (!results[i].data) continue;
-
-        fs::path img_path = stem;
-        if (batch_count > 1) {
-            img_path += "_" + std::to_string(i);
-        }
-        img_path += ext;
-
+    if (results[0].data) {
         int ok = 0;
         if (is_jpg) {
-            ok = stbi_write_jpg(img_path.string().c_str(),
-                                results[i].width, results[i].height,
-                                results[i].channel, results[i].data, 90, nullptr);
+            ok = stbi_write_jpg(output_path.c_str(),
+                                results[0].width, results[0].height,
+                                results[0].channel, results[0].data, 90, nullptr);
         } else {
-            ok = stbi_write_png(img_path.string().c_str(),
-                                results[i].width, results[i].height,
-                                results[i].channel, results[i].data, 0, nullptr);
+            ok = stbi_write_png(output_path.c_str(),
+                                results[0].width, results[0].height,
+                                results[0].channel, results[0].data, 0, nullptr);
         }
 
         if (ok) {
-            output_paths.push_back(img_path.string());
-            saved_count++;
+            saved_count = 1;
         } else {
-            fprintf(stderr, "[WARN ] Failed to save image to %s\n", img_path.string().c_str());
+            fprintf(stderr, "[WARN ] Failed to save image to %s\n", output_path.c_str());
         }
     }
 
-    // Free result images
-    for (int i = 0; i < batch_count; i++) {
-        free(results[i].data);
-        results[i].data = nullptr;
-    }
+    // Free result image
+    free(results[0].data);
+    results[0].data = nullptr;
     free(results);
 
     auto gen_end    = std::chrono::steady_clock::now();
@@ -738,20 +724,16 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
         return;
     }
 
-    // For single batch, output is a string; for multi-batch, array of strings
+    // Output is always a single image path
     json result_data = {
         {"success", true},
+        {"output", output_path},
         {"seed", seed},
         {"total_time_ms", elapsed_ms},
         {"images_saved", saved_count},
         {"prompt_cache_hit", prompt_cache_hit},
         {"ref_latent_cache_hit", any_latent_cache_hit}
     };
-    if (output_paths.size() == 1) {
-        result_data["output"] = output_paths[0];
-    } else {
-        result_data["outputs"] = output_paths;
-    }
 
     write_result(id, result_data);
 }

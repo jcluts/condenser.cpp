@@ -1170,7 +1170,6 @@ void sd_img_gen_params_init(sd_img_gen_params_t* sd_img_gen_params) {
     sd_img_gen_params->width             = 512;
     sd_img_gen_params->height            = 512;
     sd_img_gen_params->seed              = -1;
-    sd_img_gen_params->batch_count       = 1;
     sd_img_gen_params->vae_tiling_params = {false, 0, 0, 0.5f, 0.0f, 0.0f};
 }
 
@@ -1189,7 +1188,6 @@ char* sd_img_gen_params_to_str(const sd_img_gen_params_t* sd_img_gen_params) {
              "sample_params: %s\n"
              "seed: %" PRId64
              "\n"
-             "batch_count: %d\n"
              "ref_images_count: %d\n"
              "increase_ref_index: %s\n"
              "VAE tiling: %s\n",
@@ -1198,7 +1196,6 @@ char* sd_img_gen_params_to_str(const sd_img_gen_params_t* sd_img_gen_params) {
              sd_img_gen_params->height,
              SAFE_STR(sample_params_str),
              sd_img_gen_params->seed,
-             sd_img_gen_params->batch_count,
              sd_img_gen_params->ref_images_count,
              BOOL_STR(sd_img_gen_params->increase_ref_index),
              BOOL_STR(sd_img_gen_params->vae_tiling_params.enabled));
@@ -1256,7 +1253,6 @@ sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
                                     enum sample_method_t sample_method,
                                     const std::vector<float>& sigmas,
                                     int64_t seed,
-                                    int batch_count,
                                     std::vector<sd_image_t*> ref_images,
                                     std::vector<ggml_tensor*> ref_latents,
                                     bool increase_ref_index,
@@ -1304,83 +1300,72 @@ sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
     }
 
     // Sample
-    std::vector<struct ggml_tensor*> final_latents;  // collect latents to decode
     int C = sd_ctx->sd->get_latent_channel();
     int W = width / sd_ctx->sd->get_vae_scale_factor();
     int H = height / sd_ctx->sd->get_vae_scale_factor();
 
-    for (int b = 0; b < batch_count; b++) {
-        int64_t sampling_start = ggml_time_ms();
-        int64_t cur_seed       = seed + b;
-        LOG_INFO("generating image: %i/%i - seed %" PRId64, b + 1, batch_count, cur_seed);
+    int64_t sampling_start = ggml_time_ms();
+    LOG_INFO("generating image - seed %" PRId64, seed);
 
-        sd_ctx->sd->rng->manual_seed(cur_seed);
-        struct ggml_tensor* x_t   = init_latent;
-        struct ggml_tensor* noise = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, W, H, C, 1);
-        ggml_ext_im_set_randn_f32(noise, sd_ctx->sd->rng);
+    sd_ctx->sd->rng->manual_seed(seed);
+    struct ggml_tensor* x_t   = init_latent;
+    struct ggml_tensor* noise = ggml_new_tensor_4d(work_ctx, GGML_TYPE_F32, W, H, C, 1);
+    ggml_ext_im_set_randn_f32(noise, sd_ctx->sd->rng);
 
-        struct ggml_tensor* x_0 = sd_ctx->sd->sample(work_ctx,
-                                                     sd_ctx->sd->diffusion_model,
-                                                     true,
-                                                     x_t,
-                                                     noise,
-                                                     cond,
-                                                     distilled_guidance,
-                                                     eta,
-                                                     sample_method,
-                                                     sigmas,
-                                                     ref_latents,
-                                                     increase_ref_index);
-        int64_t sampling_end    = ggml_time_ms();
-        if (x_0 != nullptr) {
-            // print_ggml_tensor(x_0);
-            LOG_INFO("sampling completed, taking %.2fs", (sampling_end - sampling_start) * 1.0f / 1000);
-            final_latents.push_back(x_0);
-        } else {
-            LOG_ERROR("sampling for image %d/%d failed after %.2fs", b + 1, batch_count, (sampling_end - sampling_start) * 1.0f / 1000);
-        }
-    }
+    struct ggml_tensor* x_0 = sd_ctx->sd->sample(work_ctx,
+                                                 sd_ctx->sd->diffusion_model,
+                                                 true,
+                                                 x_t,
+                                                 noise,
+                                                 cond,
+                                                 distilled_guidance,
+                                                 eta,
+                                                 sample_method,
+                                                 sigmas,
+                                                 ref_latents,
+                                                 increase_ref_index);
+    int64_t sampling_end = ggml_time_ms();
 
     if (sd_ctx->sd->free_params_immediately) {
         sd_ctx->sd->diffusion_model->free_params_buffer();
     }
+
+    if (x_0 == nullptr) {
+        LOG_ERROR("sampling failed after %.2fs", (sampling_end - sampling_start) * 1.0f / 1000);
+        ggml_free(work_ctx);
+        return nullptr;
+    }
+    LOG_INFO("sampling completed, taking %.2fs", (sampling_end - sampling_start) * 1.0f / 1000);
+
     int64_t t3 = ggml_time_ms();
-    LOG_INFO("generating %" PRId64 " latent images completed, taking %.2fs", final_latents.size(), (t3 - t1) * 1.0f / 1000);
 
     // Decode to image
-    LOG_INFO("decoding %zu latents", final_latents.size());
-    std::vector<struct ggml_tensor*> decoded_images;  // collect decoded images
-    for (size_t i = 0; i < final_latents.size(); i++) {
-        t1                      = ggml_time_ms();
-        LOG_DEBUG("decoding latent %" PRId64, i + 1);
-        struct ggml_tensor* img = sd_ctx->sd->decode_first_stage(work_ctx, final_latents[i] /* x_0 */);
-        LOG_DEBUG("decoded latent %" PRId64, i + 1);
-        // print_ggml_tensor(img);
-        if (img != nullptr) {
-            decoded_images.push_back(img);
-        }
-        int64_t t2 = ggml_time_ms();
-        LOG_INFO("latent %" PRId64 " decoded, taking %.2fs", i + 1, (t2 - t1) * 1.0f / 1000);
-    }
-
+    t1 = ggml_time_ms();
+    struct ggml_tensor* decoded = sd_ctx->sd->decode_first_stage(work_ctx, x_0);
     int64_t t4 = ggml_time_ms();
-    LOG_INFO("decode_first_stage completed, taking %.2fs", (t4 - t3) * 1.0f / 1000);
+    LOG_INFO("decode_first_stage completed, taking %.2fs", (t4 - t1) * 1.0f / 1000);
+
     if (sd_ctx->sd->free_params_immediately) {
         sd_ctx->sd->first_stage_model->free_params_buffer();
     }
 
-    sd_image_t* result_images = (sd_image_t*)calloc(batch_count, sizeof(sd_image_t));
+    if (decoded == nullptr) {
+        LOG_ERROR("decode_first_stage returned null");
+        ggml_free(work_ctx);
+        return nullptr;
+    }
+
+    sd_image_t* result_images = (sd_image_t*)calloc(1, sizeof(sd_image_t));
     if (result_images == nullptr) {
         ggml_free(work_ctx);
         return nullptr;
     }
 
-    for (size_t i = 0; i < decoded_images.size(); i++) {
-        result_images[i].width   = width;
-        result_images[i].height  = height;
-        result_images[i].channel = 3;
-        result_images[i].data    = ggml_tensor_to_sd_image(decoded_images[i]);
-    }
+    result_images[0].width   = width;
+    result_images[0].height  = height;
+    result_images[0].channel = 3;
+    result_images[0].data    = ggml_tensor_to_sd_image(decoded);
+
     ggml_free(work_ctx);
 
     return result_images;
@@ -1489,7 +1474,6 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
 
     ggml_tensor* init_latent = nullptr;
  
-    LOG_INFO("TXT2IMG");
     init_latent = sd_ctx->sd->generate_init_latent(work_ctx, width, height);
 
     // Flux2 uses embedded guidance (distilled) — extract and apply default if needed
@@ -1505,7 +1489,7 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
     std::vector<uint8_t> empty_image_data;
 
     if (ref_images.size() > 0) {
-        LOG_INFO("EDIT mode");
+        LOG_INFO("Image edit mode enabled.");
     }
 
     // I1: Encode ref images using a temporary context for pixel tensors.
@@ -1557,7 +1541,6 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
                                                         sample_method,
                                                         sigmas,
                                                         seed,
-                                                        sd_img_gen_params->batch_count,
                                                         ref_images,
                                                         ref_latents,
                                                         sd_img_gen_params->increase_ref_index);
@@ -1782,7 +1765,6 @@ sd_image_t* generate_image_with_condition(sd_ctx_t* sd_ctx,
         sd_img_gen_params->sample_params.eta,
         width, height,
         sample_method, sigmas, seed,
-        sd_img_gen_params->batch_count,
         ref_images, ref_latents,
         sd_img_gen_params->increase_ref_index,
         condition);  // pass pre-computed condition
@@ -2039,7 +2021,6 @@ sd_image_t* generate_image_with_condition_and_latents(
         sd_img_gen_params->sample_params.eta,
         width, height,
         sample_method, sigmas, seed,
-        sd_img_gen_params->batch_count,
         ref_images, ref_latents,
         sd_img_gen_params->increase_ref_index,
         condition);  // may be NULL

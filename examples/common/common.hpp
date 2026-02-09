@@ -722,7 +722,6 @@ struct SDGenerationParams {
     std::string prompt;
     int width       = -1;
     int height      = -1;
-    int batch_count = 1;
     std::string init_image_path;
     std::vector<std::string> ref_image_paths;
     bool increase_ref_index    = false;
@@ -766,10 +765,6 @@ struct SDGenerationParams {
              "--steps",
              "number of sample steps (default: 20)",
              &sample_params.sample_steps},
-            {"-b",
-             "--batch-count",
-             "batch count",
-             &batch_count},
             {"",
              "--upscale-repeats",
              "Run the ESRGAN upscaler this many times (default: 1)",
@@ -923,7 +918,6 @@ struct SDGenerationParams {
 
         load_if_exists("width", width);
         load_if_exists("height", height);
-        load_if_exists("batch_count", batch_count);
         load_if_exists("upscale_repeats", upscale_repeats);
         load_if_exists("seed", seed);
 
@@ -1001,7 +995,6 @@ struct SDGenerationParams {
             << "  prompt: \"" << prompt << "\",\n"
             << "  width: " << width << ",\n"
             << "  height: " << height << ",\n"
-            << "  batch_count: " << batch_count << ",\n"
             << "  init_image_path: \"" << init_image_path << "\",\n"
             << "  ref_image_paths: " << vec_str_to_string(ref_image_paths) << ",\n"
             << "  increase_ref_index: " << (increase_ref_index ? "true" : "false") << ",\n"
