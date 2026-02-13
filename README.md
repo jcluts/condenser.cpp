@@ -7,11 +7,11 @@ stable-diffusion.cpp supports dozens of model architectures and sampling strateg
 ## Features
 
 - **FLUX.2 Klein** text-to-image and image-to-image (4GB and 9GB GGUF variants)
-- **Persistent engine** — load once, generate many. 3-5x faster repeat generations vs cold-start CLI
+- **Persistent engine** — load once, generate many, with faster repeat generations vs cold-start CLI
 - **Prompt conditioning cache** — same prompt with different seeds skips the text encoder entirely
 - **Reference image latent cache** — same reference image across img2img runs skips the VAE encoder
 - **Multi-backend** — Vulkan, CUDA, Metal, CPU (and experimental ROCm, SYCL, OpenCL)
-- **VRAM offloading** — run on 8-12GB GPUs by keeping idle model components on system RAM
+- **VRAM offloading** — run on 4-8GB GPUs by keeping idle model components on system RAM
 - **Flash attention** — reduced memory footprint and faster inference where supported
 - **C API** — clean C interface (`condenser.h`) for embedding into any language
 
@@ -92,23 +92,13 @@ The second generate is fast — the model stays loaded and the prompt conditioni
 
 See [tools/engine/README.md](tools/engine/README.md) for the full protocol reference, caching behavior, and integration examples (Python, Node.js).
 
-## Performance
-
-Measured on FLUX.2 Klein Q5_K, 1024x1024, 4 steps:
-
-| Workflow | cn-cli | cn-engine |
-|----------|--------|-----------|
-| First generation (cold start) | ~12s | ~12s |
-| Same model, new seed | ~12s | **3-4s** |
-| Same prompt + new seed | ~12s | **3-4s** (prompt cache hit) |
-
 ## Key Runtime Flags
 
 | Flag | Effect |
 |------|--------|
 | `--offload-to-cpu` | Keep model weights on system RAM, move to VRAM only during compute |
 | `--fa` | Enable flash attention (Vulkan, CUDA) |
-| `--vae-on-cpu` | Run VAE on CPU (workaround for CUDA quality issues) |
+| `--vae-on-cpu` | Run VAE on CPU |
 | `--llm-on-cpu` | Keep text encoder on CPU entirely |
 | `--vae-tiling` | Tile-based VAE decode for high-resolution output |
 
