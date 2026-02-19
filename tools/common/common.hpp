@@ -776,10 +776,6 @@ struct SDGenerationParams {
         };
 
         options.float_options = {
-            {"",
-             "--guidance",
-             "distilled guidance scale for models with guidance input (default: 3.5)",
-             &sample_params.guidance.distilled_guidance},
         };
 
         options.bool_options = {
@@ -924,7 +920,7 @@ struct SDGenerationParams {
         load_if_exists("increase_ref_index", increase_ref_index);
 
         load_if_exists("steps", sample_params.sample_steps);
-        load_if_exists("guidance", sample_params.guidance.distilled_guidance);
+
 
         auto load_sampler_if_exists = [&](const char* key, enum sample_method_t& out) {
             if (j.contains(key) && j[key].is_string()) {

@@ -592,7 +592,6 @@ public:
                         ggml_tensor* init_latent,
                         ggml_tensor* noise,
                         SDCondition cond,
-                        float distilled_guidance,
                         float eta,
                         sample_method_t method,
                         const std::vector<float>& sigmas,
@@ -649,7 +648,9 @@ public:
             timesteps_vec.assign(1, t);
 
             auto timesteps = vector_to_ggml_tensor(work_ctx, timesteps_vec);
-            std::vector<float> guidance_vec(1, distilled_guidance);
+            // Klein models don't use guidance embedding (guidance_embed=false),
+            // so the guidance tensor is ignored by the model. Pass 1.0 as a no-op.
+            std::vector<float> guidance_vec(1, 1.0f);
             auto guidance_tensor = vector_to_ggml_tensor(work_ctx, guidance_vec);
 
             copy_ggml_tensor(noised_input, input);
@@ -1136,7 +1137,6 @@ char* sd_ctx_params_to_str(const sd_ctx_params_t* sd_ctx_params) {
 
 void sd_sample_params_init(sd_sample_params_t* sample_params) {
     *sample_params                             = {};
-    sample_params->guidance.distilled_guidance = 3.5f;
     sample_params->sample_method               = SAMPLE_METHOD_COUNT;
     sample_params->sample_steps                = 20;
     sample_params->custom_sigmas               = nullptr;
@@ -1150,11 +1150,9 @@ char* sd_sample_params_to_str(const sd_sample_params_t* sample_params) {
     buf[0] = '\0';
 
     snprintf(buf + strlen(buf), 4096 - strlen(buf),
-             "(distilled_guidance: %.2f, "
-             "sample_method: %s, "
+             "(sample_method: %s, "
              "sample_steps: %d, "
              "eta: %.2f)",
-             sample_params->guidance.distilled_guidance,
              sd_sample_method_name(sample_params->sample_method),
              sample_params->sample_steps,
              sample_params->eta);
@@ -1245,7 +1243,6 @@ sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
                                     struct ggml_context* work_ctx,
                                     ggml_tensor* init_latent,
                                     std::string prompt,
-                                    float distilled_guidance,
                                     float eta,
                                     int width,
                                     int height,
@@ -1317,7 +1314,6 @@ sd_image_t* generate_image_internal(sd_ctx_t* sd_ctx,
                                                  x_t,
                                                  noise,
                                                  cond,
-                                                 distilled_guidance,
                                                  eta,
                                                  sample_method,
                                                  sigmas,
@@ -1386,14 +1382,13 @@ struct GenerationPrepared {
     int                      width;
     int                      height;
     int64_t                  seed;
-    float                    distilled_guidance;
     float                    eta;
     size_t                   t0;  // timestamp at start of generation
 
     GenerationPrepared()
         : work_ctx(nullptr), pinned_buf(nullptr), init_latent(nullptr),
           sample_method(EULER_SAMPLE_METHOD), width(0), height(0), seed(0),
-          distilled_guidance(1.0f), eta(0.0f), t0(0) {}
+          eta(0.0f), t0(0) {}
 };
 
 // Returns nullptr on failure. Caller owns the returned struct and its work_ctx/pinned_buf.
@@ -1512,12 +1507,6 @@ static GenerationPrepared* prepare_generation(
     // Create init latent
     ggml_tensor* init_latent = sd_ctx->sd->generate_init_latent(work_ctx, width, height);
 
-    // Extract distilled guidance
-    float distilled_guidance = params->sample_params.guidance.distilled_guidance;
-    if (distilled_guidance == 3.5f) {
-        distilled_guidance = 1.0f;
-    }
-
     // Build ref_images vector
     std::vector<sd_image_t*> ref_images;
     for (int i = 0; i < params->ref_images_count; i++) {
@@ -1538,7 +1527,6 @@ static GenerationPrepared* prepare_generation(
     prep->width              = width;
     prep->height             = height;
     prep->seed               = seed;
-    prep->distilled_guidance = distilled_guidance;
     prep->eta                = params->sample_params.eta;
     prep->t0                 = t0;
     return prep;
@@ -1625,7 +1613,7 @@ sd_image_t* generate_image(sd_ctx_t* sd_ctx, const sd_img_gen_params_t* sd_img_g
     sd_image_t* result_images = generate_image_internal(
         sd_ctx, prep->work_ctx, prep->init_latent,
         SAFE_STR(sd_img_gen_params->prompt),
-        prep->distilled_guidance, prep->eta,
+        prep->eta,
         prep->width, prep->height,
         prep->sample_method, prep->sigmas, prep->seed,
         prep->ref_images, ref_latents,
@@ -1731,7 +1719,7 @@ sd_image_t* generate_image_with_condition(sd_ctx_t* sd_ctx,
     sd_image_t* result_images = generate_image_internal(
         sd_ctx, prep->work_ctx, prep->init_latent,
         SAFE_STR(sd_img_gen_params->prompt),
-        prep->distilled_guidance, prep->eta,
+        prep->eta,
         prep->width, prep->height,
         prep->sample_method, prep->sigmas, prep->seed,
         prep->ref_images, ref_latents,
@@ -1861,7 +1849,7 @@ sd_image_t* generate_image_with_condition_and_latents(
     sd_image_t* result_images = generate_image_internal(
         sd_ctx, prep->work_ctx, prep->init_latent,
         SAFE_STR(sd_img_gen_params->prompt),
-        prep->distilled_guidance, prep->eta,
+        prep->eta,
         prep->width, prep->height,
         prep->sample_method, prep->sigmas, prep->seed,
         prep->ref_images, ref_latents,

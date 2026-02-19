@@ -136,11 +136,6 @@ typedef struct {
 } sd_image_t;
 
 typedef struct {
-    float distilled_guidance;
-} sd_guidance_params_t;
-
-typedef struct {
-    sd_guidance_params_t guidance;
     enum sample_method_t sample_method;
     int sample_steps;
     float eta;

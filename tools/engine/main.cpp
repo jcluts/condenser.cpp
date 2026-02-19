@@ -405,7 +405,7 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
     sd_sample_params_init(&sample_params);
 
     if (p.contains("steps"))    sample_params.sample_steps = p["steps"].get<int>();
-    if (p.contains("guidance")) sample_params.guidance.distilled_guidance = p["guidance"].get<float>();
+
 
     // Sampling method
     std::string method_str = p.value("sampling_method", "");
