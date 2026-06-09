@@ -25,10 +25,11 @@ echo '{"cmd":"ping","id":"1"}' | ./bin/cn-engine
 ./bin/cn-engine
 # Then type commands, one JSON object per line:
 {"cmd":"ping","id":"1"}
-{"cmd":"load","id":"2","params":{"diffusion_model":"/path/to/model.gguf","vae":"/path/to/ae.safetensors","llm":"/path/to/qwen.gguf"}}
-{"cmd":"generate","id":"3","params":{"prompt":"a cat on a windowsill","width":1024,"height":1024,"seed":42,"steps":4,"output":"./output.png"}}
+{"cmd":"load","id":"2","params":{"diffusion_model":"/path/to/model.gguf","vae":"/path/to/ae.safetensors","llm":"/path/to/qwen.gguf","upscale_model":"/path/to/realesrgan-x4plus-anime.safetensors"}}
+{"cmd":"generate","id":"3","params":{"prompt":"a cat on a windowsill","width":1024,"height":1024,"seed":42,"steps":4,"upscale_repeats":1,"output":"./output.png"}}
 {"cmd":"generate","id":"4","params":{"prompt":"a cat on a windowsill","width":1024,"height":1024,"seed":99,"steps":4,"output":"./output2.png"}}
-{"cmd":"quit","id":"5"}
+{"cmd":"upscale","id":"5","params":{"input":"./output2.png","upscale_repeats":1,"output":"./output2_x4.png"}}
+{"cmd":"quit","id":"6"}
 ```
 
 The second `generate` command will be **much faster** because the model is already loaded.
@@ -76,7 +77,12 @@ Creates or replaces the inference context. Frees any previously loaded model fir
     "llm_on_cpu": false,
     "vae_on_cpu": false,
     "vae_decode_only": true,
-    "free_params_immediately": true
+    "free_params_immediately": false,
+    "upscale_model": "/path/to/realesrgan-x4plus-anime.safetensors",
+    "upscale_offload_to_cpu": false,
+    "upscale_direct": false,
+    "upscale_n_threads": 8,
+    "upscale_tile_size": 128
   }
 }
 ```
@@ -85,7 +91,7 @@ All `params` fields except model paths are optional with sensible defaults.
 
 Response:
 ```json
-{"id": "req-1", "type": "ok", "data": {"status": "model_loaded", "model_info": "model.gguf", "load_time_ms": 8500}}
+{"id": "req-1", "type": "ok", "data": {"status": "model_loaded", "model_info": "model.gguf", "load_time_ms": 8500, "upscaler_loaded": true, "upscaler_model": "/path/to/realesrgan-x4plus-anime.safetensors"}}
 ```
 
 #### `generate` — Run Inference
@@ -112,11 +118,17 @@ Generates images using the currently loaded model. Fails if no model is loaded.
       "tile_size_y": 256,
       "target_overlap": 0.5
     },
+    "upscale_repeats": 1,
+    "upscale_factor": 4,
     "use_prompt_cache": true,
     "use_ref_latent_cache": true
   }
 }
 ```
+
+**`upscale_repeats`** (default: `0`): If greater than 0, runs ESRGAN upscaling on the generated image this many times before saving.
+
+**`upscale_factor`** (default: `4`): Upscale factor argument passed to the library upscaler. For common RealESRGAN x4 models this value is currently ignored by the model and x4 is used.
 
 **`use_prompt_cache`** (default: `true`): When enabled, the engine caches the text encoder (LLM) output keyed by prompt string. On subsequent generations with the same prompt but a different seed, dimensions, or sampling settings, the text encoder is skipped entirely — saving ~0.5-2s per generation. The cache is automatically cleared on model load/unload. Up to 16 prompt conditions are cached with LRU eviction.
 
@@ -141,7 +153,44 @@ On the first generation with a new prompt, the conditioning progress will show `
 
 Final result (includes `prompt_cache_hit` and `ref_latent_cache_hit` fields):
 ```json
-{"id": "req-2", "type": "result", "data": {"success": true, "output": "/path/to/output.png", "seed": 42, "total_time_ms": 4200, "images_saved": 1, "prompt_cache_hit": false, "ref_latent_cache_hit": false}}
+{"id": "req-2", "type": "result", "data": {"success": true, "output": "/path/to/output.png", "seed": 42, "total_time_ms": 4200, "images_saved": 1, "prompt_cache_hit": false, "ref_latent_cache_hit": false, "upscaled": true, "upscale_repeats": 1}}
+```
+
+#### `upscale` — Standalone ESRGAN Upscale
+
+Upscales an existing image file on disk. You can either:
+- provide an upscaler once during `load` using `upscale_model`, or
+- provide `upscale_model` per request in `upscale` params.
+
+```json
+{
+  "cmd": "upscale",
+  "id": "req-upscale-1",
+  "params": {
+    "input": "/path/to/input.png",
+    "output": "/path/to/output_x4.png",
+    "upscale_repeats": 1,
+    "upscale_factor": 4,
+    "upscale_model": "/path/to/realesrgan-x4plus-anime.safetensors",
+    "upscale_offload_to_cpu": false,
+    "upscale_direct": false,
+    "upscale_n_threads": 8,
+    "upscale_tile_size": 128
+  }
+}
+```
+
+During upscale, the engine emits streaming progress messages:
+
+```json
+{"id":"req-upscale-1","type":"progress","data":{"phase":"upscaling","message":"Running upscaler..."}}
+{"id":"req-upscale-1","type":"progress","data":{"phase":"upscaling","step":1,"total_steps":64,"step_time_s":0.03}}
+{"id":"req-upscale-1","type":"progress","data":{"phase":"upscaling","step":2,"total_steps":64,"step_time_s":0.03}}
+```
+
+Result:
+```json
+{"id":"req-upscale-1","type":"result","data":{"success":true,"output":"/path/to/output_x4.png","total_time_ms":980,"upscale_repeats":1,"upscale_factor":4,"width":4096,"height":4096}}
 ```
 
 #### `unload` — Free VRAM
@@ -165,12 +214,12 @@ Response:
 
 Response (model loaded):
 ```json
-{"id": "req-4", "type": "ok", "data": {"model_loaded": true, "model_info": "flux2-klein-Q5_K.gguf", "uptime_s": 342}}
+{"id": "req-4", "type": "ok", "data": {"model_loaded": true, "model_info": "flux2-klein-Q5_K.gguf", "uptime_s": 342, "upscaler_loaded": true, "upscaler_model": "/path/to/realesrgan-x4plus-anime.safetensors"}}
 ```
 
 Response (no model):
 ```json
-{"id": "req-4", "type": "ok", "data": {"model_loaded": false}}
+{"id": "req-4", "type": "ok", "data": {"model_loaded": false, "upscaler_loaded": false, "upscaler_model": ""}}
 ```
 
 #### `quit` — Graceful Shutdown
@@ -201,7 +250,7 @@ The engine also shuts down cleanly if stdin is closed (e.g., parent process exit
 {"id": "req-2", "type": "error", "data": {"message": "No model loaded — send a 'load' command first", "code": "NO_MODEL"}}
 ```
 
-Error codes: `PARSE_ERROR`, `UNKNOWN_CMD`, `NO_MODEL`, `CTX_CREATION_FAILED`, `REF_IMAGE_LOAD_FAILED`, `OUTPUT_DIR_FAILED`, `GENERATION_FAILED`, `NO_OUTPUT`.
+Error codes: `PARSE_ERROR`, `UNKNOWN_CMD`, `NO_MODEL`, `NO_UPSCALER`, `CTX_CREATION_FAILED`, `UPSCALER_CREATION_FAILED`, `REF_IMAGE_LOAD_FAILED`, `OUTPUT_DIR_FAILED`, `GENERATION_FAILED`, `UPSCALE_FAILED`, `NO_OUTPUT`.
 
 ## Design Decisions
 

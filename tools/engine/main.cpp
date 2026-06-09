@@ -81,17 +81,34 @@ static void stderr_log_cb(enum sd_log_level_t level, const char* text, void* /*d
 
 struct ProgressCtx {
     std::string request_id;
+    std::string phase;
 };
 
 static void json_progress_cb(int step, int steps, float time, void* data) {
     auto* ctx = static_cast<ProgressCtx*>(data);
+    if (!ctx) return;
+    const std::string phase = ctx->phase.empty() ? std::string("sampling") : ctx->phase;
     write_progress(ctx->request_id, {
-        {"phase", "sampling"},
+        {"phase", phase},
         {"step", step},
         {"total_steps", steps},
         {"step_time_s", time}
     });
 }
+
+class ProgressCallbackScope {
+  public:
+    explicit ProgressCallbackScope(ProgressCtx* ctx) {
+        sd_set_progress_callback(json_progress_cb, ctx);
+    }
+
+    ~ProgressCallbackScope() {
+        sd_set_progress_callback(nullptr, nullptr);
+    }
+
+    ProgressCallbackScope(const ProgressCallbackScope&) = delete;
+    ProgressCallbackScope& operator=(const ProgressCallbackScope&) = delete;
+};
 
 // ---------------------------------------------------------------------------
 // Engine state
@@ -179,6 +196,26 @@ struct EngineState {
     sd_ctx_t* ctx                  = nullptr;
     std::string loaded_model_info;                     // human-readable name for status
     std::chrono::steady_clock::time_point load_time;   // when the model was loaded
+    upscaler_ctx_t* upscaler_ctx   = nullptr;
+    std::string upscaler_model_path;
+    bool upscaler_offload_to_cpu   = false;
+    bool upscaler_direct           = false;
+    int upscaler_n_threads         = 0;
+    int upscaler_tile_size         = 128;
+
+    void clear_upscaler() {
+        if (upscaler_ctx) {
+            free_upscaler_ctx(upscaler_ctx);
+            upscaler_ctx = nullptr;
+            fprintf(stderr, "[INFO ] Upscaler unloaded.\n");
+            fflush(stderr);
+        }
+        upscaler_model_path.clear();
+        upscaler_offload_to_cpu = false;
+        upscaler_direct = false;
+        upscaler_n_threads = 0;
+        upscaler_tile_size = 128;
+    }
 
     // Prompt conditioning cache — keyed by prompt string.
     // Cleared on model load/unload since different models produce different conditioning.
@@ -264,10 +301,16 @@ static void handle_status(const std::string& id, const EngineState& state) {
         write_ok(id, {
             {"model_loaded", true},
             {"model_info", state.loaded_model_info},
-            {"uptime_s", elapsed}
+            {"uptime_s", elapsed},
+            {"upscaler_loaded", state.upscaler_ctx != nullptr},
+            {"upscaler_model", state.upscaler_model_path}
         });
     } else {
-        write_ok(id, {{"model_loaded", false}});
+        write_ok(id, {
+            {"model_loaded", false},
+            {"upscaler_loaded", state.upscaler_ctx != nullptr},
+            {"upscaler_model", state.upscaler_model_path}
+        });
     }
 }
 
@@ -281,12 +324,14 @@ static void handle_unload(const std::string& id, EngineState& state) {
         fprintf(stderr, "[INFO ] Model unloaded, VRAM freed.\n");
         fflush(stderr);
     }
+    state.clear_upscaler();
     write_ok(id, {{"status", "model_unloaded"}});
 }
 
 static void handle_quit(const std::string& id, EngineState& state) {
     state.clear_prompt_cache();
     state.clear_latent_cache();
+    state.clear_upscaler();
     if (state.ctx) {
         free_sd_ctx(state.ctx);
         state.ctx = nullptr;
@@ -307,6 +352,7 @@ static void handle_load(const std::string& id, const json& request, EngineState&
     if (state.ctx) {
         state.clear_prompt_cache();
         state.clear_latent_cache();
+        state.clear_upscaler();
         free_sd_ctx(state.ctx);
         state.ctx = nullptr;
         state.loaded_model_info.clear();
@@ -349,6 +395,12 @@ static void handle_load(const std::string& id, const json& request, EngineState&
     // crashes on subsequent generations.  Default to false for the engine.
     ctx_params.free_params_immediately = p.value("free_params_immediately", false);
 
+    std::string upscale_model = p.value("upscale_model", "");
+    bool upscale_offload_to_cpu = p.value("upscale_offload_to_cpu", ctx_params.offload_params_to_cpu);
+    bool upscale_direct = p.value("upscale_direct", false);
+    int upscale_n_threads = p.value("upscale_n_threads", ctx_params.n_threads);
+    int upscale_tile_size = p.value("upscale_tile_size", 128);
+
     // Create context
     state.ctx = new_sd_ctx(&ctx_params);
     if (!state.ctx) {
@@ -360,6 +412,31 @@ static void handle_load(const std::string& id, const json& request, EngineState&
     state.load_time = std::chrono::steady_clock::now();
     auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                           state.load_time - start).count();
+
+    if (!upscale_model.empty()) {
+        upscaler_ctx_t* upscaler_ctx = new_upscaler_ctx(
+            upscale_model.c_str(),
+            upscale_offload_to_cpu,
+            upscale_direct,
+            upscale_n_threads,
+            upscale_tile_size);
+
+        if (!upscaler_ctx) {
+            free_sd_ctx(state.ctx);
+            state.ctx = nullptr;
+            state.loaded_model_info.clear();
+            write_error(id, "Failed to create upscaler context — check upscale_model path",
+                        "UPSCALER_CREATION_FAILED");
+            return;
+        }
+
+        state.upscaler_ctx = upscaler_ctx;
+        state.upscaler_model_path = upscale_model;
+        state.upscaler_offload_to_cpu = upscale_offload_to_cpu;
+        state.upscaler_direct = upscale_direct;
+        state.upscaler_n_threads = upscale_n_threads;
+        state.upscaler_tile_size = upscale_tile_size;
+    }
 
     // Build a human-readable model name for status reporting
     if (!diffusion_model.empty()) {
@@ -373,7 +450,156 @@ static void handle_load(const std::string& id, const json& request, EngineState&
     write_ok(id, {
         {"status", "model_loaded"},
         {"model_info", state.loaded_model_info},
-        {"load_time_ms", elapsed_ms}
+        {"load_time_ms", elapsed_ms},
+        {"upscaler_loaded", state.upscaler_ctx != nullptr},
+        {"upscaler_model", state.upscaler_model_path}
+    });
+}
+
+static void handle_upscale(const std::string& id, const json& request, EngineState& state) {
+    if (!request.contains("params") || !request["params"].is_object()) {
+        write_error(id, "upscale command requires a 'params' object");
+        return;
+    }
+    const json& p = request["params"];
+
+    std::string input = p.value("input", "");
+    std::string output = p.value("output", "output_upscaled.png");
+    int upscale_repeats = p.value("upscale_repeats", 1);
+    int upscale_factor = p.value("upscale_factor", 4);
+
+    if (input.empty()) {
+        write_error(id, "upscale command requires an 'input' path");
+        return;
+    }
+    if (upscale_repeats < 1) {
+        write_error(id, "'upscale_repeats' must be >= 1");
+        return;
+    }
+
+    upscaler_ctx_t* upscaler_ctx = state.upscaler_ctx;
+    bool using_temp_upscaler = false;
+
+    std::string request_upscale_model = p.value("upscale_model", "");
+    if (!request_upscale_model.empty()) {
+        bool offload_to_cpu = p.value("upscale_offload_to_cpu", false);
+        bool direct = p.value("upscale_direct", false);
+        int n_threads = p.value("upscale_n_threads", state.upscaler_n_threads > 0 ? state.upscaler_n_threads : 8);
+        int tile_size = p.value("upscale_tile_size", state.upscaler_tile_size > 0 ? state.upscaler_tile_size : 128);
+
+        upscaler_ctx = new_upscaler_ctx(request_upscale_model.c_str(), offload_to_cpu, direct, n_threads, tile_size);
+        if (!upscaler_ctx) {
+            write_error(id, "Failed to create temporary upscaler context", "UPSCALER_CREATION_FAILED");
+            return;
+        }
+        using_temp_upscaler = true;
+    }
+
+    if (!upscaler_ctx) {
+        write_error(id,
+                    "No upscaler loaded — provide 'upscale_model' in load params or in this command",
+                    "NO_UPSCALER");
+        return;
+    }
+
+    auto start = std::chrono::steady_clock::now();
+
+    // Route tiled ESRGAN progress through structured NDJSON events.
+    ProgressCtx prog_ctx{id, "upscaling"};
+    ProgressCallbackScope progress_scope(&prog_ctx);
+
+    sd_image_t input_image = {0, 0, 3, nullptr};
+    if (!load_sd_image_from_file(&input_image, input.c_str())) {
+        if (using_temp_upscaler) {
+            free_upscaler_ctx(upscaler_ctx);
+        }
+        write_error(id, "Failed to load input image: " + input, "REF_IMAGE_LOAD_FAILED");
+        return;
+    }
+
+    {
+        fs::path out_dir = fs::path(output).parent_path();
+        if (!out_dir.empty()) {
+            std::error_code ec;
+            fs::create_directories(out_dir, ec);
+            if (ec) {
+                free(input_image.data);
+                if (using_temp_upscaler) {
+                    free_upscaler_ctx(upscaler_ctx);
+                }
+                write_error(id, "Failed to create output directory: " + ec.message(), "OUTPUT_DIR_FAILED");
+                return;
+            }
+        }
+    }
+
+    write_progress(id, {{"phase", "upscaling"}, {"message", "Running upscaler..."}});
+
+    sd_image_t current_image = input_image;
+    for (int u = 0; u < upscale_repeats; ++u) {
+        if (upscale_repeats > 1) {
+            write_progress(id, {
+                {"phase", "upscaling"},
+                {"message", "Upscale pass " + std::to_string(u + 1) + " of " + std::to_string(upscale_repeats)}
+            });
+        }
+
+        sd_image_t upscaled_image = upscale(upscaler_ctx, current_image, upscale_factor);
+        if (upscaled_image.data == nullptr) {
+            free(current_image.data);
+            if (using_temp_upscaler) {
+                free_upscaler_ctx(upscaler_ctx);
+            }
+            write_error(id, "Upscale failed", "UPSCALE_FAILED");
+            return;
+        }
+        free(current_image.data);
+        current_image = upscaled_image;
+    }
+
+    std::string ext_lower;
+    {
+        fs::path ext = fs::path(output).has_extension() ? fs::path(output).extension() : fs::path(".png");
+        ext_lower = ext.string();
+        std::transform(ext_lower.begin(), ext_lower.end(), ext_lower.begin(), ::tolower);
+    }
+    bool is_jpg = (ext_lower == ".jpg" || ext_lower == ".jpeg");
+
+    int ok = 0;
+    if (is_jpg) {
+        ok = stbi_write_jpg(output.c_str(),
+                            current_image.width, current_image.height,
+                            current_image.channel, current_image.data, 90, nullptr);
+    } else {
+        ok = stbi_write_png(output.c_str(),
+                            current_image.width, current_image.height,
+                            current_image.channel, current_image.data, 0, nullptr);
+    }
+
+    auto end = std::chrono::steady_clock::now();
+    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+
+    int out_w = current_image.width;
+    int out_h = current_image.height;
+    free(current_image.data);
+
+    if (using_temp_upscaler) {
+        free_upscaler_ctx(upscaler_ctx);
+    }
+
+    if (!ok) {
+        write_error(id, "Failed to save image to: " + output, "NO_OUTPUT");
+        return;
+    }
+
+    write_result(id, {
+        {"success", true},
+        {"output", output},
+        {"total_time_ms", elapsed_ms},
+        {"upscale_repeats", upscale_repeats},
+        {"upscale_factor", upscale_factor},
+        {"width", out_w},
+        {"height", out_h}
     });
 }
 
@@ -391,6 +617,10 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
 
     auto gen_start = std::chrono::steady_clock::now();
 
+    // Ensure any pretty_progress calls inside the library stay on the JSON channel.
+    ProgressCtx prog_ctx{id, "sampling"};
+    ProgressCallbackScope progress_scope(&prog_ctx);
+
     // --- Build generation params ---
     std::string prompt = p.value("prompt", "");
     int width          = p.value("width", 512);
@@ -399,6 +629,19 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
 
     // Prompt conditioning cache control (default: enabled)
     bool use_prompt_cache = p.value("use_prompt_cache", true);
+    int upscale_repeats = p.value("upscale_repeats", 0);
+    int upscale_factor = p.value("upscale_factor", 4);
+
+    if (upscale_repeats < 0) {
+        write_error(id, "'upscale_repeats' must be >= 0");
+        return;
+    }
+    if (upscale_repeats > 0 && state.upscaler_ctx == nullptr) {
+        write_error(id,
+                    "No upscaler loaded — provide 'upscale_model' in load params before using upscale_repeats",
+                    "NO_UPSCALER");
+        return;
+    }
 
     // Sampling params
     sd_sample_params_t sample_params;
@@ -511,6 +754,7 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
 
     // If cache miss and caching is enabled, compute condition separately and cache it
     if (use_prompt_cache && !prompt.empty() && !prompt_cache_hit) {
+        prog_ctx.phase = "conditioning";
         sd_condition_t* new_condition = sd_compute_condition(
             state.ctx, prompt.c_str(), width, height,
             ref_images.empty() ? nullptr : ref_images.data(),
@@ -583,6 +827,7 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
 
         // For any cache misses, encode the ref images and cache the results
         if (!all_latents_cached) {
+            prog_ctx.phase = "encoding";
             for (size_t i = 0; i < ref_paths.size(); i++) {
                 if (cached_latents[i] != nullptr) continue;  // already cached
 
@@ -628,8 +873,7 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
     bool have_cached_latents = !cached_latents.empty() && all_latents_cached;
 
     // Set up progress callback for sampling steps
-    ProgressCtx prog_ctx{id};
-    sd_set_progress_callback(json_progress_cb, &prog_ctx);
+    prog_ctx.phase = "sampling";
 
     // Build the C API generation params struct
     sd_img_gen_params_t img_gen_params;
@@ -666,9 +910,6 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
         results = generate_image(state.ctx, &img_gen_params);
     }
 
-    // Clear progress callback
-    sd_set_progress_callback(nullptr, nullptr);
-
     // Free reference images
     for (auto& img : ref_images) { free(img.data); img.data = nullptr; }
 
@@ -691,17 +932,44 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
     bool is_jpg = (ext_lower == ".jpg" || ext_lower == ".jpeg");
 
     std::string output_path = output;
+    sd_image_t final_image = results[0];
+    bool final_image_uses_results_buffer = true;
 
-    if (results[0].data) {
+    if (upscale_repeats > 0) {
+        prog_ctx.phase = "upscaling";
+        write_progress(id, {{"phase", "upscaling"}, {"message", "Running upscaler..."}});
+        for (int u = 0; u < upscale_repeats; ++u) {
+            sd_image_t upscaled_image = upscale(state.upscaler_ctx, final_image, upscale_factor);
+            if (upscaled_image.data == nullptr) {
+                if (final_image.data) {
+                    free(final_image.data);
+                    if (final_image_uses_results_buffer) {
+                        results[0].data = nullptr;
+                    }
+                }
+                free(results);
+                write_error(id, "Upscale failed", "UPSCALE_FAILED");
+                return;
+            }
+            free(final_image.data);
+            if (final_image_uses_results_buffer) {
+                results[0].data = nullptr;
+                final_image_uses_results_buffer = false;
+            }
+            final_image = upscaled_image;
+        }
+    }
+
+    if (final_image.data) {
         int ok = 0;
         if (is_jpg) {
             ok = stbi_write_jpg(output_path.c_str(),
-                                results[0].width, results[0].height,
-                                results[0].channel, results[0].data, 90, nullptr);
+                                final_image.width, final_image.height,
+                                final_image.channel, final_image.data, 90, nullptr);
         } else {
             ok = stbi_write_png(output_path.c_str(),
-                                results[0].width, results[0].height,
-                                results[0].channel, results[0].data, 0, nullptr);
+                                final_image.width, final_image.height,
+                                final_image.channel, final_image.data, 0, nullptr);
         }
 
         if (ok) {
@@ -712,6 +980,11 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
     }
 
     // Free result image
+    free(final_image.data);
+    final_image.data = nullptr;
+    if (final_image_uses_results_buffer) {
+        results[0].data = nullptr;
+    }
     free(results[0].data);
     results[0].data = nullptr;
     free(results);
@@ -732,7 +1005,9 @@ static void handle_generate(const std::string& id, const json& request, EngineSt
         {"total_time_ms", elapsed_ms},
         {"images_saved", saved_count},
         {"prompt_cache_hit", prompt_cache_hit},
-        {"ref_latent_cache_hit", any_latent_cache_hit}
+        {"ref_latent_cache_hit", any_latent_cache_hit},
+        {"upscaled", upscale_repeats > 0},
+        {"upscale_repeats", upscale_repeats}
     };
 
     write_result(id, result_data);
@@ -789,6 +1064,8 @@ int main(int argc, const char* argv[]) {
             handle_load(id, request, state);
         } else if (cmd == "generate") {
             handle_generate(id, request, state);
+        } else if (cmd == "upscale") {
+            handle_upscale(id, request, state);
         } else if (cmd == "unload") {
             handle_unload(id, state);
         } else if (cmd == "status") {
@@ -804,6 +1081,7 @@ int main(int argc, const char* argv[]) {
     // Clean shutdown if stdin closes (parent process died)
     state.clear_prompt_cache();
     state.clear_latent_cache();
+    state.clear_upscaler();
     if (state.ctx) {
         fprintf(stderr, "[INFO ] stdin closed — cleaning up.\n");
         fflush(stderr);
